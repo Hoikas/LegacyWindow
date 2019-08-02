@@ -33,11 +33,19 @@
 typedef HRESULT(WINAPI* FDirectDrawCreate)(GUID FAR*, LPDIRECTDRAW FAR*, IUnknown FAR*);
 typedef HRESULT(STDMETHODCALLTYPE* FDirectDrawSetCooperativeLevel)(LPDIRECTDRAW, HWND, DWORD);
 typedef HRESULT(STDMETHODCALLTYPE* FDirectDrawSetDisplayMode)(LPDIRECTDRAW, DWORD, DWORD, DWORD);
+typedef ATOM(WINAPI* FRegisterClassExA)(_In_ CONST WNDCLASSEXA*);
+typedef HWND(WINAPI* FCreateWindowExA)(_In_ DWORD, _In_opt_ LPCSTR, _In_opt_ LPCSTR, _In_ DWORD,
+                                       _In_ int, _In_ int, _In_ int, _In_ int, _In_opt_ HWND,
+                                       _In_opt_ HMENU, _In_opt_ HINSTANCE, _In_opt_ LPVOID);
 
 // ================================================================================================
 
 static std::ofstream s_log;
+static WNDPROC s_legacyWndProc = nullptr;
+
 static MHpp_Hook<FDirectDrawCreate>* s_ddrawCreateHook = nullptr;
+static MHpp_Hook<FRegisterClassExA>* s_registerClassHook = nullptr;
+static MHpp_Hook<FCreateWindowExA>* s_createWindowHook = nullptr;
 static FDirectDrawSetCooperativeLevel s_ddrawSetCooperativeLevel = nullptr;
 static FDirectDrawSetDisplayMode s_ddrawSetDisplayMode = nullptr;
 
@@ -71,8 +79,12 @@ static LONG WINAPI HandleException(EXCEPTION_POINTERS* info)
 template<typename Args>
 static bool MakeHook(LPCWSTR module, LPCSTR func, Args hook, MHpp_Hook<Args>*& out)
 {
-    s_log << "Attempting to hook " << module << "!" << func << std::endl;
-    auto result = MHpp_Hook<FDirectDrawCreate>::Create(module, func, hook);
+    // Crap... std::ofstream won't print out wchar strings.
+    char module_temp[MAX_PATH];
+    WideCharToMultiByte(CP_UTF8, 0, module, -1, module_temp, sizeof(module_temp), nullptr, nullptr);
+
+    s_log << "Attempting to hook " << module_temp << "!" << func << std::endl;
+    auto result = MHpp_Hook<Args>::Create(module, func, hook);
     if (std::get<0>(result) == MH_OK) {
         out = std::get<1>(result);
         return true;
@@ -143,6 +155,92 @@ static HRESULT WINAPI LegacyDDrawCreate(GUID FAR* lpGUID, LPDIRECTDRAW FAR* lplp
 
 // ================================================================================================
 
+static LRESULT WINAPI WndProcDebug(HWND wnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+#define DECLARE_WM(x) \
+    case x: \
+        s_log << #x << " "; \
+        break;
+
+    LRESULT result = CallWindowProcA(s_legacyWndProc, wnd, msg, wParam, lParam);
+
+    s_log << "WndProc: Forwarded ";
+    switch (msg) {
+#include "WM.inl"
+    default:
+        s_log << "0x" << std::hex << msg << " ";
+        break;
+    }
+
+    s_log << std::hex << "wParam: " << wParam << " lParam: " << lParam << " Result: "
+          << result << std::endl;
+    return result;
+
+#undef DECLARE_WM
+}
+
+// ================================================================================================
+
+static LRESULT WINAPI WndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_WINDOWPOSCHANGING:
+    case WM_WINDOWPOSCHANGED:
+        return CallWindowProcA(DefWindowProcA, wnd, msg, wParam, lParam);
+
+#ifdef WM_DEBUG_LOG
+    // These are called so frequently the log is useless.
+    case WM_NCHITTEST:
+    case WM_MOUSEFIRST:
+    case WM_SETCURSOR:
+        return CallWindowProcA(s_legacyWndProc, wnd, msg, wParam, lParam);
+#endif
+
+    default:
+#ifdef WM_DEBUG_LOG
+        return CallWindowProcA(&WndProcDebug, wnd, msg, wParam, lParam);
+#else
+        return CallWindowProcA(s_legacyWndProc, wnd, msg, wParam, lParam);
+#endif
+    }
+}
+
+// ================================================================================================
+
+static ATOM WINAPI LegacyRegisterClass(_In_ CONST WNDCLASSEXA* wndclass)
+{
+    s_log << "RegisterClassExA: original WndProc " << std::hex << wndclass->lpfnWndProc << std::endl;
+    s_legacyWndProc = wndclass->lpfnWndProc;
+
+    // Naughty touching
+    const_cast<WNDCLASSEXA*>(wndclass)->lpfnWndProc = &WndProc;
+    return s_registerClassHook->original()(wndclass);
+}
+
+// ================================================================================================
+
+static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpClassName,
+                                      _In_opt_ LPCSTR lpWindowName, _In_ DWORD dwStyle,
+                                      _In_ int X, _In_ int Y, _In_ int nWidth, _In_ int nHeight,
+                                      _In_opt_ HWND hWndParent, _In_opt_ HMENU hMenu,
+                                      _In_opt_ HINSTANCE hInstance, _In_opt_ LPVOID lpParam)
+{
+    s_log << "CreateWindowExA: requested... dwExStyle: 0x" << std::hex << dwExStyle <<
+             " dwStyle: 0x" << std::hex << dwStyle << std::endl;
+
+    // According to science (read: logging), JMP3 actually makes two windows.
+    // First, it makes a window for the intro video--this one looks a bit weird for some reason,
+    // Then, it makes the main game window. Unfortunately, this means we can just do stuff like
+    // pass-through CW_USEDEFAULT because the game window will appear to "jump" around.
+    dwStyle |= WS_CAPTION | WS_THICKFRAME;
+
+    return s_createWindowHook->original()(dwExStyle, lpClassName, lpWindowName, dwStyle,
+                                          X, Y, nWidth, nHeight, hWndParent, hMenu,
+                                          hInstance, lpParam);
+}
+
+// ================================================================================================
+
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
     switch (fdwReason) {
@@ -159,16 +257,23 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
             break;
         }
 
-        if (!MakeHook(L"ddraw.dll", "DirectDrawCreate", LegacyDDrawCreate, s_ddrawCreateHook)) {
-            ExitProcess(1);
-            break;
-        }
+#define MAKE_HOOK(m, f, r, t) \
+    if (!MakeHook(m, f, r, t)) { \
+        ExitProcess(1); \
+        break; \
+    }
+        MAKE_HOOK(L"ddraw.dll", "DirectDrawCreate", LegacyDDrawCreate, s_ddrawCreateHook);
+        MAKE_HOOK(L"User32.dll", "RegisterClassExA", LegacyRegisterClass, s_registerClassHook);
+        MAKE_HOOK(L"User32.dll", "CreateWindowExA", LegacyCreateWindow, s_createWindowHook);
+#undef MAKE_HOOK
         break;
     }
     case DLL_PROCESS_DETACH:
         s_log << "NOTICE: legacy.exe closing..." << std::endl;
 
         delete s_ddrawCreateHook;
+        delete s_registerClassHook;
+        delete s_createWindowHook;
 
         MH_STATUS status = MH_Uninitialize();
         if (status != MH_OK) {
