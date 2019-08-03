@@ -19,7 +19,13 @@
  * THE SOFTWARE.
  */
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
-#include <ddraw.h>
+#ifndef __LEGACY_DLL_H
+#define __LEGACY_DLL_H
+
+bool InitDDrawHooks();
+void DeInitDDrawHooks();
+
+bool InitWin32Hooks();
+void DeInitWin32Hooks();
+
+#endif

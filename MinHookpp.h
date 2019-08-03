@@ -84,4 +84,32 @@ std::tuple<MH_STATUS, MHpp_Hook<Args>*> MHpp_Hook<Args>::Create(LPCWSTR module, 
     return std::make_tuple(status, new MHpp_Hook<Args>((Args)original, replacement, (Args)target));
 }
 
+// ================================================================================================
+
+template<typename Args>
+inline bool MakeHook(LPCWSTR module, LPCSTR func, Args hook, MHpp_Hook<Args>*& out)
+{
+    // Crap... std::ofstream won't print out wchar strings.
+    char module_temp[MAX_PATH];
+    WideCharToMultiByte(CP_UTF8, 0, module, -1, module_temp, sizeof(module_temp), nullptr, nullptr);
+
+    s_log << "Attempting to hook " << module_temp << "!" << func << std::endl;
+    auto result = MHpp_Hook<Args>::Create(module, func, hook);
+    if (std::get<0>(result) == MH_OK) {
+        out = std::get<1>(result);
+        return true;
+    } else {
+        s_log << "ERROR: " << MH_StatusToString(std::get<0>(result)) << std::endl;
+        return false;
+    }
+}
+
+// ================================================================================================
+
+#define MAKE_HOOK(m, f, r, t) \
+    if (!MakeHook(m, f, r, t)) { \
+        ExitProcess(1); \
+        return false; \
+    }
+
 #endif

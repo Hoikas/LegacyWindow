@@ -15,7 +15,7 @@ add_executable(EXE WIN32 WinMain.cpp)
 set_target_properties(EXE PROPERTIES OUTPUT_NAME "legacy_window")
 target_link_libraries(EXE Shlwapi)
 
-add_library(DLL SHARED DLLMain.cpp)
+add_library(DLL SHARED DLLMain.cpp LegacyDDraw.cpp LegacyWin32.cpp)
 set_target_properties(DLL PROPERTIES OUTPUT_NAME "legacy_windowhook")
 target_link_libraries(DLL DbgHelp)
 target_link_libraries(DLL minhook)
