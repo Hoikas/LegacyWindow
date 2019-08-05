@@ -39,6 +39,8 @@ static MHpp_Hook<FCreateWindowExA>* s_createWindowHook = nullptr;
 static MHpp_Hook<FGetWindowRect>* s_getWindowRectHook = nullptr;
 static MHpp_Hook<FGetClientRect>* s_getClientRectHook = nullptr;
 static MHpp_Hook<FOutputDebugStringA>* s_outputDebugStringHook = nullptr;
+static MHpp_Hook<FGetCursorPos>* s_getCursorPosHook = nullptr;
+static MHpp_Hook<FSetCursorPos>* s_setCursorPosHook = nullptr;
 static MHpp_Hook<FClientToScreen>* s_clientToScreenHook = nullptr;
 static MHpp_Hook<FScreenToClient>* s_screenToClientHook = nullptr;
 
@@ -209,6 +211,29 @@ static BOOL WINAPI LegacyGetClientRect(_In_ HWND hWnd, _Out_ LPRECT lpRect)
 
 // ================================================================================================
 
+static BOOL WINAPI LegacyGetCursorPos(_Out_ LPPOINT lpPoint)
+{
+    POINT pos{ 0 };
+    if (s_getCursorPosHook->original()(&pos) == FALSE)
+        return FALSE;
+    if (s_screenToClientHook->original()(s_legacyHWND, &pos) == FALSE)
+        return FALSE;
+    *lpPoint = pos;
+    return TRUE;
+}
+
+// ================================================================================================
+
+static BOOL WINAPI LegacySetCursorPos(_In_ int X, _In_ int Y)
+{
+    POINT pos{ X, Y };
+    if (s_screenToClientHook->original()(s_legacyHWND, &pos) == FALSE)
+        return FALSE;
+    return s_setCursorPosHook->original()(pos.x, pos.y);
+}
+
+// ================================================================================================
+
 static BOOL WINAPI LegacyGetClientToScreen(_In_ HWND hWnd, _Inout_ LPPOINT lpPoint)
 {
     return TRUE;
@@ -289,6 +314,8 @@ bool Win32InitHooks()
     MAKE_HOOK(L"User32.dll", "CreateWindowExA", LegacyCreateWindow, s_createWindowHook);
     MAKE_HOOK(L"User32.dll", "GetWindowRect", LegacyGetWindowRect, s_getWindowRectHook);
     MAKE_HOOK(L"User32.dll", "GetClientRect", LegacyGetClientRect, s_getClientRectHook);
+    MAKE_HOOK(L"User32.dll", "GetCursorPos", LegacyGetCursorPos, s_getCursorPosHook);
+    MAKE_HOOK(L"User32.dll", "SetCursorPos", LegacySetCursorPos, s_setCursorPosHook);
     MAKE_HOOK(L"User32.dll", "ClientToScreen", LegacyGetClientToScreen, s_clientToScreenHook);
     MAKE_HOOK(L"User32.dll", "ScreenToClient", LegacyGetScreenToClient, s_screenToClientHook);
     MAKE_HOOK(L"Kernel32.dll", "OutputDebugStringA", LegacyOutputDebugString, s_outputDebugStringHook);
@@ -303,6 +330,8 @@ void Win32DeInitHooks()
     delete s_createWindowHook;
     delete s_getWindowRectHook;
     delete s_getClientRectHook;
+    delete s_getCursorPosHook;
+    delete s_setCursorPosHook;
     delete s_clientToScreenHook;
     delete s_screenToClientHook;
     delete s_outputDebugStringHook;
