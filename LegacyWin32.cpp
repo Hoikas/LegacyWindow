@@ -33,6 +33,7 @@ extern std::ofstream s_log;
 
 static WNDPROC s_legacyWndProc = nullptr;
 static HWND s_legacyHWND;
+static uint32_t s_mousedowns = 0;
 
 static MHpp_Hook<FRegisterClassExA>* s_registerClassHook = nullptr;
 static MHpp_Hook<FCreateWindowExA>* s_createWindowHook = nullptr;
@@ -100,6 +101,34 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
     case WM_WINDOWPOSCHANGING:
     case WM_WINDOWPOSCHANGED:
         return CallWindowProcA(DefWindowProcA, wnd, msg, wParam, lParam);
+
+    // Ensure the cursor does not do weird stuff when we're panning
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDBLCLK: {
+        if ((wParam & MK_LBUTTON) && s_mousedowns++ == 0) {
+            RECT rect;
+            s_getClientRectHook->original()(wnd, &rect);
+            MapWindowPoints(wnd, HWND_DESKTOP, (LPPOINT)&rect, 2);
+            ClipCursor(&rect);
+            SetCapture(wnd);
+        }
+        return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
+    }
+    case WM_LBUTTONUP: {
+        if (--s_mousedowns == 0) {
+            ClipCursor(nullptr);
+            ReleaseCapture();
+        }
+        return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
+    }
+    case WM_CANCELMODE: {
+        if (s_mousedowns) {
+            s_mousedowns = 0;
+            ClipCursor(nullptr);
+            ReleaseCapture();
+        }
+        return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
+    }
 
 #ifdef LEGACY_WM_DEBUG_LOG
     // These are called so frequently the log is useless.
@@ -226,10 +255,8 @@ static BOOL WINAPI LegacyGetCursorPos(_Out_ LPPOINT lpPoint)
 
 static BOOL WINAPI LegacySetCursorPos(_In_ int X, _In_ int Y)
 {
-    POINT pos{ X, Y };
-    if (s_screenToClientHook->original()(s_legacyHWND, &pos) == FALSE)
-        return FALSE;
-    return s_setCursorPosHook->original()(pos.x, pos.y);
+    // Sorry Gage, but you can't move the cursor around.
+    return TRUE;
 }
 
 // ================================================================================================
