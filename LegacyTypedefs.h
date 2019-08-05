@@ -60,5 +60,9 @@ typedef BOOL(WINAPI* FGetClientRect)(_In_ HWND, _Out_ LPRECT);
 typedef BOOL(WINAPI* FAdjustWindowRect)(_Inout_ LPRECT, _In_ DWORD, _In_ BOOL);
 typedef VOID(WINAPI* FOutputDebugStringA)(_In_opt_ LPCSTR);
 typedef BOOL(WINAPI* FSetProcessAffinityMask)(_In_ HANDLE, _In_ DWORD_PTR);
+typedef BOOL(WINAPI* FGetCursorPos)(_Out_ LPPOINT);
+typedef BOOL(WINAPI* FSetCursorPos)(_In_ int, _In_ int);
+typedef BOOL(WINAPI* FClientToScreen)(_In_ HWND, _Inout_ LPPOINT);
+typedef BOOL(WINAPI* FScreenToClient)(_In_ HWND, _Inout_ LPPOINT);
 
 #endif

@@ -39,6 +39,8 @@ static MHpp_Hook<FCreateWindowExA>* s_createWindowHook = nullptr;
 static MHpp_Hook<FGetWindowRect>* s_getWindowRectHook = nullptr;
 static MHpp_Hook<FGetClientRect>* s_getClientRectHook = nullptr;
 static MHpp_Hook<FOutputDebugStringA>* s_outputDebugStringHook = nullptr;
+static MHpp_Hook<FClientToScreen>* s_clientToScreenHook = nullptr;
+static MHpp_Hook<FScreenToClient>* s_screenToClientHook = nullptr;
 
 // ================================================================================================
 
@@ -207,6 +209,20 @@ static BOOL WINAPI LegacyGetClientRect(_In_ HWND hWnd, _Out_ LPRECT lpRect)
 
 // ================================================================================================
 
+static BOOL WINAPI LegacyGetClientToScreen(_In_ HWND hWnd, _Inout_ LPPOINT lpPoint)
+{
+    return TRUE;
+}
+
+// ================================================================================================
+
+static BOOL WINAPI LegacyGetScreenToClient(_In_ HWND hWnd, _Inout_ LPPOINT lpPoint)
+{
+    return TRUE;
+}
+
+// ================================================================================================
+
 static VOID WINAPI LegacyOutputDebugString(_In_opt_ LPCSTR lpOutputString)
 {
     // Legacy.exe has some (limited) debug information available. Also, the gog.com version of
@@ -273,6 +289,8 @@ bool Win32InitHooks()
     MAKE_HOOK(L"User32.dll", "CreateWindowExA", LegacyCreateWindow, s_createWindowHook);
     MAKE_HOOK(L"User32.dll", "GetWindowRect", LegacyGetWindowRect, s_getWindowRectHook);
     MAKE_HOOK(L"User32.dll", "GetClientRect", LegacyGetClientRect, s_getClientRectHook);
+    MAKE_HOOK(L"User32.dll", "ClientToScreen", LegacyGetClientToScreen, s_clientToScreenHook);
+    MAKE_HOOK(L"User32.dll", "ScreenToClient", LegacyGetScreenToClient, s_screenToClientHook);
     MAKE_HOOK(L"Kernel32.dll", "OutputDebugStringA", LegacyOutputDebugString, s_outputDebugStringHook);
     return true;
 }
@@ -285,5 +303,7 @@ void Win32DeInitHooks()
     delete s_createWindowHook;
     delete s_getWindowRectHook;
     delete s_getClientRectHook;
+    delete s_clientToScreenHook;
+    delete s_screenToClientHook;
     delete s_outputDebugStringHook;
 }
