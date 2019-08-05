@@ -83,6 +83,12 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
         // depended on by our hook for future window creations that will take place before this
         // window's CreateWindowExA returns.
         s_legacyHWND = wnd;
+
+        // QuickTime videos are played in the Legacy.exe WndProc. This worked fine in Windows 98,
+        // however, later versions of Windows get mad if you don't service the message queue
+        // every five seconds. Thankfully, we have this built-in workaround from MS.
+        DisableProcessWindowsGhosting();
+
         return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
     }
 
