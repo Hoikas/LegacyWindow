@@ -29,18 +29,10 @@
 
 // ================================================================================================
 
-enum
-{
-    e_hwndCreated = (1<<0),
-};
-
-// ================================================================================================
-
 extern std::ofstream s_log;
 
 static WNDPROC s_legacyWndProc = nullptr;
 static HWND s_legacyHWND;
-static uint32_t s_flags = 0;
 
 static MHpp_Hook<FRegisterClassExA>* s_registerClassHook = nullptr;
 static MHpp_Hook<FCreateWindowExA>* s_createWindowHook = nullptr;
@@ -75,15 +67,30 @@ static LRESULT WINAPI WndProcDebug(HWND wnd, UINT msg, WPARAM wParam, LPARAM lPa
 
 // ================================================================================================
 
-static LRESULT WINAPI WndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lParam)
+static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-//#define WM_DEBUG_LOG
+//#define LEGACY_WM_DEBUG_LOG
+#ifdef LEGACY_WM_DEBUG_LOG
+    WNDPROC BaseWndProc = &WndProcDebug;
+#else
+    WNDPROC BaseWndProc = s_legacyWndProc;
+#endif
+
     switch (msg) {
+    case WM_CREATE: {
+        // If we are here, we are definitely the s_legacyHWND. That value is currently null and is
+        // depended on by our hook for future window creations that will take place before this
+        // window's CreateWindowExA returns.
+        s_legacyHWND = wnd;
+        return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
+    }
+
+    // Legacy's WndProc prevents the Window from moving.
     case WM_WINDOWPOSCHANGING:
     case WM_WINDOWPOSCHANGED:
         return CallWindowProcA(DefWindowProcA, wnd, msg, wParam, lParam);
 
-#ifdef WM_DEBUG_LOG
+#ifdef LEGACY_WM_DEBUG_LOG
     // These are called so frequently the log is useless.
     case WM_NCHITTEST:
     case WM_MOUSEFIRST:
@@ -92,11 +99,7 @@ static LRESULT WINAPI WndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lParam)
 #endif
 
     default:
-#ifdef WM_DEBUG_LOG
-        return CallWindowProcA(&WndProcDebug, wnd, msg, wParam, lParam);
-#else
-        return CallWindowProcA(s_legacyWndProc, wnd, msg, wParam, lParam);
-#endif
+        return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
     }
 }
 
@@ -112,7 +115,7 @@ static ATOM WINAPI LegacyRegisterClass(_In_ CONST WNDCLASSEXA* wndclass)
 #endif
 
     // Naughty touching
-    const_cast<WNDCLASSEXA*>(wndclass)->lpfnWndProc = &WndProc;
+    const_cast<WNDCLASSEXA*>(wndclass)->lpfnWndProc = &LegacyWndProc;
     return s_registerClassHook->original()(wndclass);
 }
 
@@ -127,15 +130,9 @@ static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpCl
     s_log << "CreateWindowExA: requested... dwExStyle: 0x" << std::hex << dwExStyle
           << " dwStyle: 0x" << std::hex << dwStyle << std::endl;
 
-    if (s_flags & e_hwndCreated) {
-        s_log << "CreateWindowExA: client HWND already initialized, using that" << std::endl;
-        return s_legacyHWND;
-    } else {
-        // According to science (read: logging), JMP3 actually makes two windows.
-        // First, it makes a window for the intro video--this one looks a bit weird for some reason,
-        // Then, it makes the main game window. Unfortunately, this means we can just do stuff like
-        // pass-through CW_USEDEFAULT because the game window will appear to "jump" around.
+    if (lpWindowName && strcmp(lpWindowName, "Legacy of Time") == 0) {
         dwStyle |= WS_CAPTION | WS_THICKFRAME;
+        dwStyle &= ~WS_POPUP;
 
         // The game only requests a 640x480 window. Unfortunately, there is nonclient area, such as
         // title bars and menus to consider as well.
@@ -144,16 +141,41 @@ static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpCl
         nWidth = window_rect.right - window_rect.left;
         nHeight = window_rect.bottom - window_rect.top;
 
-        s_log << "CreateWindowExA: creating window... dwStyle: 0x" << std::hex << dwStyle
+        // Make life interesting by spawning somewhere nice.
+        X = CW_USEDEFAULT;
+        Y = CW_USEDEFAULT;
+
+        s_log << "CreateWindowExA: creating Legacy window... dwStyle: 0x" << std::hex << dwStyle
               << " nWidth: " << std::dec << nWidth << " nHeight: " << nHeight << std::endl;
 
         HWND wnd = s_createWindowHook->original()(dwExStyle, lpClassName, lpWindowName, dwStyle,
                                                   X, Y, nWidth, nHeight, hWndParent, hMenu,
                                                   hInstance, lpParam);
+        // NOTE: this is something of a fool's errand here... The call to CreateWindowExA pumps the
+        // WndProc several times, which actually spawns another call to CreateWindowExA. Yay.
+        // To fix this issue, we intercept a WM and set it early. Leaving this here for completeness,
+        // however...
         s_legacyHWND = wnd;
-        s_flags |= e_hwndCreated;
         return wnd;
+    } else if (lpClassName && strncmp(lpClassName, "QTIdle", 6) == 0) {
+        // We need for the X and Y coordinates of the window to be the screenspace client origin
+        // of the legacy window.
+        {
+            POINT origin{ 0 };
+            MapWindowPoints(s_legacyHWND, HWND_DESKTOP, &origin, 1);
+            X = origin.x;
+            Y = origin.y;
+        }
+
+        s_log << "CreateWindowExA: creating intro-video window... X: "
+              << std::dec << X << " Y: " << Y << std::endl;
+    } else {
+        s_log << "CreateWindowExA: passing non-Legacy window creation to Win32" << std::endl;
     }
+
+    return s_createWindowHook->original()(dwExStyle, lpClassName, lpWindowName, dwStyle,
+                                          X, Y, nWidth, nHeight, hWndParent, hMenu,
+                                          hInstance, lpParam);
 }
 
 // ================================================================================================
