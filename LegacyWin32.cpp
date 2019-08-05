@@ -29,13 +29,23 @@
 
 // ================================================================================================
 
+enum
+{
+    e_hwndCreated = (1<<0),
+};
+
+// ================================================================================================
+
 extern std::ofstream s_log;
 
 static WNDPROC s_legacyWndProc = nullptr;
 static HWND s_legacyHWND;
+static uint32_t s_flags = 0;
 
 static MHpp_Hook<FRegisterClassExA>* s_registerClassHook = nullptr;
 static MHpp_Hook<FCreateWindowExA>* s_createWindowHook = nullptr;
+static MHpp_Hook<FGetWindowRect>* s_getWindowRectHook = nullptr;
+static MHpp_Hook<FGetClientRect>* s_getClientRectHook = nullptr;
 
 // ================================================================================================
 
@@ -57,7 +67,7 @@ static LRESULT WINAPI WndProcDebug(HWND wnd, UINT msg, WPARAM wParam, LPARAM lPa
     }
 
     s_log << std::hex << "wParam: 0x" << wParam << " lParam: 0x" << lParam << " Result: 0x"
-        << result << std::endl;
+          << result << std::endl;
     return result;
 
 #undef DECLARE_WM
@@ -114,35 +124,82 @@ static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpCl
                                       _In_opt_ HWND hWndParent, _In_opt_ HMENU hMenu,
                                       _In_opt_ HINSTANCE hInstance, _In_opt_ LPVOID lpParam)
 {
-    s_log << "CreateWindowExA: requested... dwExStyle: 0x" << std::hex << dwExStyle <<
-        " dwStyle: 0x" << std::hex << dwStyle << std::endl;
+    s_log << "CreateWindowExA: requested... dwExStyle: 0x" << std::hex << dwExStyle
+          << " dwStyle: 0x" << std::hex << dwStyle << std::endl;
 
-// According to science (read: logging), JMP3 actually makes two windows.
-// First, it makes a window for the intro video--this one looks a bit weird for some reason,
-// Then, it makes the main game window. Unfortunately, this means we can just do stuff like
-// pass-through CW_USEDEFAULT because the game window will appear to "jump" around.
-    dwStyle |= WS_CAPTION | WS_THICKFRAME;
+    if (s_flags & e_hwndCreated) {
+        s_log << "CreateWindowExA: client HWND already initialized, using that" << std::endl;
+        return s_legacyHWND;
+    } else {
+        // According to science (read: logging), JMP3 actually makes two windows.
+        // First, it makes a window for the intro video--this one looks a bit weird for some reason,
+        // Then, it makes the main game window. Unfortunately, this means we can just do stuff like
+        // pass-through CW_USEDEFAULT because the game window will appear to "jump" around.
+        dwStyle |= WS_CAPTION | WS_THICKFRAME;
 
-    HWND wnd = s_createWindowHook->original()(dwExStyle, lpClassName, lpWindowName, dwStyle,
-                                              X, Y, nWidth, nHeight, hWndParent, hMenu,
-                                              hInstance, lpParam);
-    // FIXME: this might be the temporary intro video window.
-    s_legacyHWND = wnd;
-    return wnd;
+        // The game only requests a 640x480 window. Unfortunately, there is nonclient area, such as
+        // title bars and menus to consider as well.
+        RECT window_rect = { 0, 0, nWidth, nHeight };
+        AdjustWindowRect(&window_rect, dwStyle, FALSE);
+        nWidth = window_rect.right - window_rect.left;
+        nHeight = window_rect.bottom - window_rect.top;
+
+        s_log << "CreateWindowExA: creating window... dwStyle: 0x" << std::hex << dwStyle
+              << " nWidth: " << std::dec << nWidth << " nHeight: " << nHeight << std::endl;
+
+        HWND wnd = s_createWindowHook->original()(dwExStyle, lpClassName, lpWindowName, dwStyle,
+                                                  X, Y, nWidth, nHeight, hWndParent, hMenu,
+                                                  hInstance, lpParam);
+        s_legacyHWND = wnd;
+        s_flags |= e_hwndCreated;
+        return wnd;
+    }
 }
 
 // ================================================================================================
 
-bool InitWin32Hooks()
+static BOOL WINAPI LegacyGetWindowRect(_In_ HWND hWnd, _Out_ LPRECT lpRect)
+{
+    // QuickTime calls this method every frame it plays and uses these values as an offset,
+    // which it propagates to IDirectDrawSurface::Lock. This causes an error when we try to lock
+    // a region of the surface outside of the 640x480 area.
+    SetRect(lpRect, 0, 0, 640, 480);
+    return TRUE;
+}
+
+// ================================================================================================
+
+static BOOL WINAPI LegacyGetClientRect(_In_ HWND hWnd, _Out_ LPRECT lpRect)
+{
+    // See above
+    SetRect(lpRect, 0, 0, 640, 480);
+    return TRUE;
+}
+
+// ================================================================================================
+
+HWND Win32GetClientHWND()
+{
+    return s_legacyHWND;
+}
+
+// ================================================================================================
+
+bool Win32InitHooks()
 {
     MAKE_HOOK(L"User32.dll", "RegisterClassExA", LegacyRegisterClass, s_registerClassHook);
     MAKE_HOOK(L"User32.dll", "CreateWindowExA", LegacyCreateWindow, s_createWindowHook);
+    MAKE_HOOK(L"User32.dll", "GetWindowRect", LegacyGetWindowRect, s_getWindowRectHook);
+    MAKE_HOOK(L"User32.dll", "GetClientRect", LegacyGetClientRect, s_getClientRectHook);
+    return true;
 }
 
 // ================================================================================================
 
-void DeInitWin32Hooks()
+void Win32DeInitHooks()
 {
     delete s_registerClassHook;
     delete s_createWindowHook;
+    delete s_getWindowRectHook;
+    delete s_getClientRectHook;
 }

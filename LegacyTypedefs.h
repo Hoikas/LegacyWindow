@@ -27,6 +27,23 @@
 // ================================================================================================
 
 typedef HRESULT(WINAPI* FDirectDrawCreate)(GUID FAR*, LPDIRECTDRAW FAR*, IUnknown FAR*);
+
+typedef ULONG(STDMETHODCALLTYPE* FUnknownAddRef)(LPUNKNOWN);
+typedef ULONG(STDMETHODCALLTYPE* FUnknownRelease)(LPUNKNOWN);
+
+typedef HRESULT(STDMETHODCALLTYPE* FDirectDrawSurfaceBlt)(LPDIRECTDRAWSURFACE, LPRECT,
+                                                          LPDIRECTDRAWSURFACE, LPRECT, DWORD,
+                                                          LPDDBLTFX);
+typedef HRESULT(STDMETHODCALLTYPE* FDirectDrawSurfaceBltBatch)(LPDIRECTDRAWSURFACE, LPDDBLTBATCH,
+                                                               DWORD, DWORD);
+typedef HRESULT(STDMETHODCALLTYPE* FDirectDrawSurfaceBltFast)(LPDIRECTDRAWSURFACE, DWORD, DWORD,
+                                                              LPDIRECTDRAWSURFACE, LPRECT, DWORD);
+typedef HRESULT(STDMETHODCALLTYPE* FDirectDrawSurfaceGetDC)(LPDIRECTDRAWSURFACE, HDC FAR*);
+typedef HRESULT(STDMETHODCALLTYPE* FDirectDrawSurfaceLock)(LPDIRECTDRAWSURFACE, LPRECT,
+                                                           LPDDSURFACEDESC, DWORD, HANDLE);
+typedef HRESULT(STDMETHODCALLTYPE* FDirectDrawSurfaceReleaseDC)(LPDIRECTDRAWSURFACE, HDC);
+typedef HRESULT(STDMETHODCALLTYPE* FDirectDrawSurfaceUnlock)(LPDIRECTDRAWSURFACE, LPVOID);
+
 typedef HRESULT(STDMETHODCALLTYPE* FDirectDrawCreateSurface)(LPDIRECTDRAW, LPDDSURFACEDESC,
                                                              LPDIRECTDRAWSURFACE FAR*, IUnknown FAR*);
 typedef HRESULT(STDMETHODCALLTYPE* FDirectDrawFlipToGDISurface)(LPDIRECTDRAW);
@@ -38,5 +55,8 @@ typedef ATOM(WINAPI* FRegisterClassExA)(_In_ CONST WNDCLASSEXA*);
 typedef HWND(WINAPI* FCreateWindowExA)(_In_ DWORD, _In_opt_ LPCSTR, _In_opt_ LPCSTR, _In_ DWORD,
                                        _In_ int, _In_ int, _In_ int, _In_ int, _In_opt_ HWND,
                                        _In_opt_ HMENU, _In_opt_ HINSTANCE, _In_opt_ LPVOID);
+typedef BOOL(WINAPI* FGetWindowRect)(_In_ HWND, _Out_ LPRECT);
+typedef BOOL(WINAPI* FGetClientRect)(_In_ HWND, _Out_ LPRECT);
+typedef BOOL(WINAPI* FAdjustWindowRect)(_Inout_ LPRECT, _In_ DWORD, _In_ BOOL);
 
 #endif

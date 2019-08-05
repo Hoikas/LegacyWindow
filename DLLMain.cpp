@@ -78,17 +78,17 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
             break;
         }
 
-        if (!InitDDrawHooks())
+        if (!DDrawInitHooks())
             break;
-        if (!InitWin32Hooks())
+        if (!Win32InitHooks())
             break;
         break;
     }
     case DLL_PROCESS_DETACH:
         s_log << "NOTICE: legacy.exe closing..." << std::endl;
 
-        DeInitDDrawHooks();
-        DeInitWin32Hooks();
+        DDrawDeInitHooks();
+        Win32DeInitHooks();
 
         MH_STATUS status = MH_Uninitialize();
         if (status != MH_OK) {

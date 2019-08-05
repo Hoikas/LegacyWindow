@@ -22,10 +22,12 @@
 #ifndef __LEGACY_DLL_H
 #define __LEGACY_DLL_H
 
-bool InitDDrawHooks();
-void DeInitDDrawHooks();
+bool DDrawInitHooks();
+void DDrawDeInitHooks();
 
-bool InitWin32Hooks();
-void DeInitWin32Hooks();
+void Win32GetClientScreenspaceRect(RECT& client);
+HWND Win32GetClientHWND();
+bool Win32InitHooks();
+void Win32DeInitHooks();
 
 #endif
