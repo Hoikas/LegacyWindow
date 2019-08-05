@@ -25,8 +25,8 @@
 bool DDrawInitHooks();
 void DDrawDeInitHooks();
 
-void Win32GetClientScreenspaceRect(RECT& client);
 HWND Win32GetClientHWND();
+bool Win32SetThreadCount(int nthreads);
 bool Win32InitHooks();
 void Win32DeInitHooks();
 

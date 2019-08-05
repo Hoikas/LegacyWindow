@@ -78,6 +78,13 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
             break;
         }
 
+        // If this is a gog.com release of Legacy of Time, they include a ddraw.dll that helpfully
+        // acts as a No-CD patch. It also, OTOH, restricts the game to one CPU core. While this is
+        // generally a good idea, we actually need two cores due to our having a dedicated draw
+        // thread. Actual play testing indicates all CPUs is most performant.
+        if (!Win32SetThreadCount(-1))
+            break;
+
         if (!DDrawInitHooks())
             break;
         if (!Win32InitHooks())

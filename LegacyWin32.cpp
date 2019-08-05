@@ -38,6 +38,7 @@ static MHpp_Hook<FRegisterClassExA>* s_registerClassHook = nullptr;
 static MHpp_Hook<FCreateWindowExA>* s_createWindowHook = nullptr;
 static MHpp_Hook<FGetWindowRect>* s_getWindowRectHook = nullptr;
 static MHpp_Hook<FGetClientRect>* s_getClientRectHook = nullptr;
+static MHpp_Hook<FOutputDebugStringA>* s_outputDebugStringHook = nullptr;
 
 // ================================================================================================
 
@@ -200,9 +201,62 @@ static BOOL WINAPI LegacyGetClientRect(_In_ HWND hWnd, _Out_ LPRECT lpRect)
 
 // ================================================================================================
 
+static VOID WINAPI LegacyOutputDebugString(_In_opt_ LPCSTR lpOutputString)
+{
+    // Legacy.exe has some (limited) debug information available. Also, the gog.com version of
+    // Legacy seems to contain its own ddraw.dll with some debug information.
+    s_log << "OutputDebugStringA: " << lpOutputString << std::flush;
+}
+
+// ================================================================================================
+
 HWND Win32GetClientHWND()
 {
     return s_legacyHWND;
+}
+
+// ================================================================================================
+
+bool Win32SetThreadCount(int nthreads)
+{
+    HANDLE process = GetCurrentProcess();
+    DWORD_PTR paff, saff;
+    GetProcessAffinityMask(process, &paff, &saff);
+
+    DWORD_PTR desired_affinity = 0;
+    int ncpus = 0;
+    int nthreadscur = 0;
+    for (DWORD_PTR mask = 1<<0; mask <= saff; mask <<= 1) {
+        if (saff & mask)
+            ncpus++;
+        if (paff & mask)
+            nthreadscur++;
+    }
+
+    if (nthreads == -1 || ncpus <= nthreads) {
+        desired_affinity = saff;
+    } else {
+        int i = nthreads;
+        for (DWORD_PTR mask = 1<<0; mask <= saff && i; mask <<= 1) {
+            if (saff & mask) {
+                desired_affinity |= mask;
+                i--;
+            }
+        }
+    }
+
+    s_log << "Win32SetThreadCount: System CPUs: " << std::dec << ncpus << " Current Concurrency: "
+          << nthreadscur << std::endl;
+    if (ncpus < nthreads) {
+        s_log << "Win32SetThreadCount: ERROR! Requested more concurrency than available!"
+              << std::endl;
+    }
+    if (nthreadscur != nthreads) {
+        s_log << "Win32SetThreadCount: Setting Concurrency: " << ((nthreads == -1) ? ncpus : nthreads)
+              << " AffinityMask: 0x" << std::hex << desired_affinity << std::endl;
+        SetProcessAffinityMask(process, desired_affinity);
+    }
+    return true;
 }
 
 // ================================================================================================
@@ -213,6 +267,7 @@ bool Win32InitHooks()
     MAKE_HOOK(L"User32.dll", "CreateWindowExA", LegacyCreateWindow, s_createWindowHook);
     MAKE_HOOK(L"User32.dll", "GetWindowRect", LegacyGetWindowRect, s_getWindowRectHook);
     MAKE_HOOK(L"User32.dll", "GetClientRect", LegacyGetClientRect, s_getClientRectHook);
+    MAKE_HOOK(L"Kernel32.dll", "OutputDebugStringA", LegacyOutputDebugString, s_outputDebugStringHook);
     return true;
 }
 
@@ -224,4 +279,5 @@ void Win32DeInitHooks()
     delete s_createWindowHook;
     delete s_getWindowRectHook;
     delete s_getClientRectHook;
+    delete s_outputDebugStringHook;
 }

@@ -58,5 +58,7 @@ typedef HWND(WINAPI* FCreateWindowExA)(_In_ DWORD, _In_opt_ LPCSTR, _In_opt_ LPC
 typedef BOOL(WINAPI* FGetWindowRect)(_In_ HWND, _Out_ LPRECT);
 typedef BOOL(WINAPI* FGetClientRect)(_In_ HWND, _Out_ LPRECT);
 typedef BOOL(WINAPI* FAdjustWindowRect)(_Inout_ LPRECT, _In_ DWORD, _In_ BOOL);
+typedef VOID(WINAPI* FOutputDebugStringA)(_In_opt_ LPCSTR);
+typedef BOOL(WINAPI* FSetProcessAffinityMask)(_In_ HANDLE, _In_ DWORD_PTR);
 
 #endif
