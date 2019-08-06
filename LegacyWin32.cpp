@@ -33,6 +33,7 @@ extern std::ofstream s_log;
 
 static WNDPROC s_legacyWndProc = nullptr;
 static HWND s_legacyHWND;
+static HMENU s_legacyMenu = nullptr;
 static uint32_t s_mousedowns = 0;
 
 static MHpp_Hook<FRegisterClassExA>* s_registerClassHook = nullptr;
@@ -44,6 +45,9 @@ static MHpp_Hook<FGetCursorPos>* s_getCursorPosHook = nullptr;
 static MHpp_Hook<FSetCursorPos>* s_setCursorPosHook = nullptr;
 static MHpp_Hook<FClientToScreen>* s_clientToScreenHook = nullptr;
 static MHpp_Hook<FScreenToClient>* s_screenToClientHook = nullptr;
+static MHpp_Hook<FSetMenu>* s_setMenuHook = nullptr;
+static MHpp_Hook<FLoadMenu>* s_loadMenuHook = nullptr;
+static MHpp_Hook<FGetSystemMetrics>* s_getSystemMetricsHook = nullptr;
 
 // ================================================================================================
 
@@ -130,8 +134,9 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
 #ifdef LEGACY_WM_DEBUG_LOG
     // These are called so frequently the log is useless.
     case WM_NCHITTEST:
-    case WM_MOUSEFIRST:
+    case WM_MOUSEMOVE:
     case WM_SETCURSOR:
+    case WM_ENTERIDLE:
         return CallWindowProcA(s_legacyWndProc, wnd, msg, wParam, lParam);
 #endif
 
@@ -165,7 +170,7 @@ static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpCl
                                       _In_opt_ HINSTANCE hInstance, _In_opt_ LPVOID lpParam)
 {
     s_log << "CreateWindowExA: requested... dwExStyle: 0x" << std::hex << dwExStyle
-          << " dwStyle: 0x" << std::hex << dwStyle << std::endl;
+          << " dwStyle: 0x" << std::hex << dwStyle << " hMenu: 0x" << hMenu << std::endl;
 
     if (lpWindowName && strcmp(lpWindowName, "Legacy of Time") == 0) {
         dwStyle |= WS_CAPTION | WS_THICKFRAME;
@@ -173,21 +178,31 @@ static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpCl
 
         // The game only requests a 640x480 window. Unfortunately, there is nonclient area, such as
         // title bars and menus to consider as well.
-        RECT window_rect = { 0, 0, nWidth, nHeight };
-        AdjustWindowRect(&window_rect, dwStyle, FALSE);
+        RECT window_rect{ 0, 0, nWidth, nHeight };
+        AdjustWindowRect(&window_rect, dwStyle, TRUE);
         nWidth = window_rect.right - window_rect.left;
         nHeight = window_rect.bottom - window_rect.top;
+
+        // Legacy loads its own menu but passes nullptr to us... Grrr...
+        if (!hMenu) {
+            // s_legacyMenu != nullptr, but just in case...
+            if (!s_legacyMenu)
+                LoadMenuA(GetModuleHandleA(nullptr), MAKEINTRESOURCEA(101));
+            hMenu = s_legacyMenu;
+        }
 
         // Make life interesting by spawning somewhere nice.
         X = CW_USEDEFAULT;
         Y = CW_USEDEFAULT;
 
         s_log << "CreateWindowExA: creating Legacy window... dwStyle: 0x" << std::hex << dwStyle
-              << " nWidth: " << std::dec << nWidth << " nHeight: " << nHeight << std::endl;
+              << " nWidth: " << std::dec << nWidth << " nHeight: " << nHeight << " hMenu: 0x"
+              << std::hex << hMenu << std::endl;
 
         HWND wnd = s_createWindowHook->original()(dwExStyle, lpClassName, lpWindowName, dwStyle,
                                                   X, Y, nWidth, nHeight, hWndParent, hMenu,
                                                   hInstance, lpParam);
+
         // NOTE: this is something of a fool's errand here... The call to CreateWindowExA pumps the
         // WndProc several times, which actually spawns another call to CreateWindowExA. Yay.
         // To fix this issue, we intercept a WM and set it early. Leaving this here for completeness,
@@ -272,6 +287,46 @@ static BOOL WINAPI LegacyGetScreenToClient(_In_ HWND hWnd, _Inout_ LPPOINT lpPoi
 
 // ================================================================================================
 
+static BOOL WINAPI LegacySetMenu(_In_ HWND hWnd, _In_opt_ HMENU hMenu)
+{
+    if (!hMenu)
+        s_log << "SetMenu: ate attempt to murder the menu" << std::endl;
+    return TRUE;
+}
+
+// ================================================================================================
+
+static HMENU WINAPI LegacyLoadMenu(_In_opt_ HINSTANCE hInstance, _In_ LPCSTR lpMenuName)
+{
+    bool is_legacyMenu = hInstance == GetModuleHandleA(nullptr) && lpMenuName == MAKEINTRESOURCEA(101);
+    if (s_legacyMenu && is_legacyMenu) {
+        s_log << "LoadMenuA: servicing duplicate load request for menu " << (ULONG_PTR)lpMenuName << std::endl;
+        return s_legacyMenu;
+    } else {
+        s_log << "LoadMenuA: loading menu " << (ULONG_PTR)lpMenuName << std::endl;
+        HMENU result = s_loadMenuHook->original()(hInstance, lpMenuName);
+        if (is_legacyMenu)
+            s_legacyMenu = result;
+        return result;
+    }
+}
+
+// ================================================================================================
+
+static int WINAPI LegacyGetSystemMetrics(_In_ int nIndex)
+{
+    switch (nIndex) {
+    case SM_CXSCREEN:
+        return 640;
+    case SM_CYSCREEN:
+        return 480;
+    default:
+        return s_getSystemMetricsHook->original()(nIndex);
+    }
+}
+
+// ================================================================================================
+
 static VOID WINAPI LegacyOutputDebugString(_In_opt_ LPCSTR lpOutputString)
 {
     // Legacy.exe has some (limited) debug information available. Also, the gog.com version of
@@ -342,6 +397,9 @@ bool Win32InitHooks()
     MAKE_HOOK(L"User32.dll", "SetCursorPos", LegacySetCursorPos, s_setCursorPosHook);
     MAKE_HOOK(L"User32.dll", "ClientToScreen", LegacyGetClientToScreen, s_clientToScreenHook);
     MAKE_HOOK(L"User32.dll", "ScreenToClient", LegacyGetScreenToClient, s_screenToClientHook);
+    MAKE_HOOK(L"User32.dll", "SetMenu", LegacySetMenu, s_setMenuHook);
+    MAKE_HOOK(L"User32.dll", "LoadMenuA", LegacyLoadMenu, s_loadMenuHook);
+    MAKE_HOOK(L"User32.dll", "GetSystemMetrics", LegacyGetSystemMetrics, s_getSystemMetricsHook);
     MAKE_HOOK(L"Kernel32.dll", "OutputDebugStringA", LegacyOutputDebugString, s_outputDebugStringHook);
     return true;
 }
@@ -358,5 +416,8 @@ void Win32DeInitHooks()
     delete s_setCursorPosHook;
     delete s_clientToScreenHook;
     delete s_screenToClientHook;
+    delete s_setMenuHook;
+    delete s_loadMenuHook;
+    delete s_getSystemMetricsHook;
     delete s_outputDebugStringHook;
 }
