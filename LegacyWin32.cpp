@@ -121,12 +121,9 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
         }
         return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
     }
-    case WM_CANCELMODE: {
-        if (s_mousedowns) {
-            s_mousedowns = 0;
-            ClipCursor(nullptr);
-            ReleaseCapture();
-        }
+    case WM_CAPTURECHANGED: {
+        s_mousedowns = 0;
+        ClipCursor(nullptr);
         return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
     }
 
