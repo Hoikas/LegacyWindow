@@ -191,6 +191,16 @@ static ATOM WINAPI LegacyRegisterClass(_In_ CONST WNDCLASSEXA* wndclass)
 
 // ================================================================================================
 
+static void LegacyFixMenu(HMENU menu)
+{
+    // Legacy.exe defer-inits the Cinematics menu. It looks sloppy for it to only appear
+    // once it's moused over, however...
+    HMENU hmCinematics = CreateMenu();
+    AppendMenuA(menu, MF_POPUP, (UINT_PTR)hmCinematics, "Cinematics");
+}
+
+// ================================================================================================
+
 static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpClassName,
                                       _In_opt_ LPCSTR lpWindowName, _In_ DWORD dwStyle,
                                       _In_ int X, _In_ int Y, _In_ int nWidth, _In_ int nHeight,
@@ -207,25 +217,16 @@ static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpCl
         // The game only requests a 640x480 window. Unfortunately, there is nonclient area, such as
         // title bars and menus to consider as well.
         RECT window_rect{ 0, 0, nWidth, nHeight };
-        AdjustWindowRect(&window_rect, dwStyle, TRUE);
+        AdjustWindowRect(&window_rect, dwStyle, hMenu != nullptr);
         nWidth = window_rect.right - window_rect.left;
         nHeight = window_rect.bottom - window_rect.top;
-
-        // Legacy loads its own menu but passes nullptr to us... Grrr...
-        if (!hMenu) {
-            // s_legacyMenu != nullptr, but just in case...
-            if (!s_legacyMenu)
-                LoadMenuA(GetModuleHandleA(nullptr), MAKEINTRESOURCEA(101));
-            hMenu = s_legacyMenu;
-        }
 
         // Make life interesting by spawning somewhere nice.
         X = CW_USEDEFAULT;
         Y = CW_USEDEFAULT;
 
         s_log << "CreateWindowExA: creating Legacy window... dwStyle: 0x" << std::hex << dwStyle
-              << " nWidth: " << std::dec << nWidth << " nHeight: " << nHeight << " hMenu: 0x"
-              << std::hex << hMenu << std::endl;
+              << " nWidth: " << std::dec << nWidth << " nHeight: " << nHeight << std::endl;
 
         HWND wnd = s_createWindowHook->original()(dwExStyle, lpClassName, lpWindowName, dwStyle,
                                                   X, Y, nWidth, nHeight, hWndParent, hMenu,
@@ -236,6 +237,27 @@ static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpCl
         // To fix this issue, we intercept a WM and set it early. Leaving this here for completeness,
         // however...
         s_legacyHWND = wnd;
+
+        // Legacy loads its own menu but passes nullptr to us... Grrr...
+        if (!hMenu) {
+            HMENU menu = LoadMenuA(GetModuleHandleA(nullptr), MAKEINTRESOURCEA(101));
+            LegacyFixMenu(menu);
+            s_setMenuHook->original()(wnd, menu);
+
+            // Ensure the client window is the correct size.
+            s_getClientRectHook->original()(wnd, &window_rect);
+            AdjustWindowRect(&window_rect, dwStyle, TRUE);
+            nWidth = window_rect.right - window_rect.left;
+            nHeight = window_rect.bottom - window_rect.top;
+            s_log << "CreateWindowExA: resizing Legacy window for... hMenu: " << std::hex
+                  << menu << " nWidth: " << std::dec << nWidth << std::dec << " nHeight: "
+                  << nHeight << std::endl;
+            SetWindowPos(wnd, HWND_TOP, -1, -1, nWidth, nHeight, (SWP_NOCOPYBITS | SWP_NOMOVE));
+
+            // Ensure menu is drawn
+            DrawMenuBar(wnd);
+        }
+
         return wnd;
     } else if (lpClassName && strncmp(lpClassName, "QTIdle", 6) == 0) {
         // We need for the X and Y coordinates of the window to be the screenspace client origin
