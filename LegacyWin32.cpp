@@ -29,11 +29,19 @@
 
 // ================================================================================================
 
+enum
+{
+    e_overrideWindowRect = (1<<0),
+};
+
+// ================================================================================================
+
 extern std::ofstream s_log;
 
 static WNDPROC s_legacyWndProc = nullptr;
 static HWND s_legacyHWND;
 static HMENU s_legacyMenu = nullptr;
+static uint32_t s_flags = 0;
 
 static MHpp_Hook<FRegisterClassExA>* s_registerClassHook = nullptr;
 static MHpp_Hook<FCreateWindowExA>* s_createWindowHook = nullptr;
@@ -114,6 +122,9 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
         // every five seconds. Thankfully, we have this built-in workaround from MS.
         DisableProcessWindowsGhosting();
 
+        // Setup default flags
+        s_flags |= e_overrideWindowRect;
+
         return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
     }
 
@@ -132,6 +143,20 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
     case WM_CAPTURECHANGED: {
         ClipCursor(nullptr);
         return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
+    }
+
+    // These undocumented messages don't handle menu highlighting properly when our
+    // clientspace == screenspace hacks are active, unfortunately.
+    case WM_UAHDESTROYWINDOW:
+    case WM_UAHDRAWMENU:
+    case WM_UAHDRAWMENUITEM:
+    case WM_UAHINITMENU:
+    case WM_UAHMEASUREMENUITEM:
+    case WM_UAHNCPAINTMENUPOPUP: {
+        s_flags &= ~e_overrideWindowRect;
+        LRESULT result = CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
+        s_flags |= e_overrideWindowRect;
+        return result;
     }
 
 #ifdef LEGACY_WM_DEBUG_LOG
@@ -176,7 +201,7 @@ static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpCl
           << " dwStyle: 0x" << std::hex << dwStyle << " hMenu: 0x" << hMenu << std::endl;
 
     if (lpWindowName && strcmp(lpWindowName, "Legacy of Time") == 0) {
-        dwStyle |= WS_CAPTION | WS_THICKFRAME;
+        dwStyle |= WS_CAPTION;
         dwStyle &= ~WS_POPUP;
 
         // The game only requests a 640x480 window. Unfortunately, there is nonclient area, such as
@@ -240,8 +265,12 @@ static BOOL WINAPI LegacyGetWindowRect(_In_ HWND hWnd, _Out_ LPRECT lpRect)
     // QuickTime calls this method every frame it plays and uses these values as an offset,
     // which it propagates to IDirectDrawSurface::Lock. This causes an error when we try to lock
     // a region of the surface outside of the 640x480 area.
-    SetRect(lpRect, 0, 0, 640, 480);
-    return TRUE;
+    if (s_flags & e_overrideWindowRect) {
+        SetRect(lpRect, 0, 0, 640, 480);
+        return TRUE;
+    } else {
+        return s_getWindowRectHook->original()(hWnd, lpRect);
+    }
 }
 
 // ================================================================================================
