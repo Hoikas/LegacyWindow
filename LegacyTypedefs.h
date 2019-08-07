@@ -65,7 +65,8 @@ typedef BOOL(WINAPI* FSetCursorPos)(_In_ int, _In_ int);
 typedef BOOL(WINAPI* FClientToScreen)(_In_ HWND, _Inout_ LPPOINT);
 typedef BOOL(WINAPI* FScreenToClient)(_In_ HWND, _Inout_ LPPOINT);
 typedef BOOL(WINAPI* FSetMenu)(_In_ HWND, _In_opt_ HMENU);
-typedef HMENU(WINAPI* FLoadMenu)(_In_opt_ HINSTANCE hInstance, _In_ LPCSTR lpMenuName);
+typedef HMENU(WINAPI* FLoadMenu)(_In_opt_ HINSTANCE, _In_ LPCSTR);
 typedef int(WINAPI* FGetSystemMetrics)(_In_ int);
+typedef BOOL(WINAPI* FPeekMessage)(_Out_ LPMSG, _In_opt_ HWND, _In_ UINT, _In_ UINT, _In_ UINT);
 
 #endif

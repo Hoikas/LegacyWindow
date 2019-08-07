@@ -34,7 +34,6 @@ extern std::ofstream s_log;
 static WNDPROC s_legacyWndProc = nullptr;
 static HWND s_legacyHWND;
 static HMENU s_legacyMenu = nullptr;
-static uint32_t s_mousedowns = 0;
 
 static MHpp_Hook<FRegisterClassExA>* s_registerClassHook = nullptr;
 static MHpp_Hook<FCreateWindowExA>* s_createWindowHook = nullptr;
@@ -48,6 +47,23 @@ static MHpp_Hook<FScreenToClient>* s_screenToClientHook = nullptr;
 static MHpp_Hook<FSetMenu>* s_setMenuHook = nullptr;
 static MHpp_Hook<FLoadMenu>* s_loadMenuHook = nullptr;
 static MHpp_Hook<FGetSystemMetrics>* s_getSystemMetricsHook = nullptr;
+static MHpp_Hook<FPeekMessage>* s_peekMessageHook = nullptr;
+
+// ================================================================================================
+
+static void LegacyHandleLMB(HWND wnd, bool down)
+{
+    if (down) {
+        RECT rect;
+        s_getClientRectHook->original()(wnd, &rect);
+        MapWindowPoints(wnd, HWND_DESKTOP, (LPPOINT)& rect, 2);
+        ClipCursor(&rect);
+        SetCapture(wnd);
+    } else {
+        ClipCursor(nullptr);
+        ReleaseCapture();
+    }
+}
 
 // ================================================================================================
 
@@ -108,25 +124,12 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
 
     // Ensure the cursor does not do weird stuff when we're panning
     case WM_LBUTTONDOWN:
-    case WM_LBUTTONDBLCLK: {
-        if ((wParam & MK_LBUTTON) && s_mousedowns++ == 0) {
-            RECT rect;
-            s_getClientRectHook->original()(wnd, &rect);
-            MapWindowPoints(wnd, HWND_DESKTOP, (LPPOINT)&rect, 2);
-            ClipCursor(&rect);
-            SetCapture(wnd);
-        }
-        return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
-    }
+    case WM_LBUTTONDBLCLK:
     case WM_LBUTTONUP: {
-        if (--s_mousedowns == 0) {
-            ClipCursor(nullptr);
-            ReleaseCapture();
-        }
+        LegacyHandleLMB(wnd, (wParam & MK_LBUTTON));
         return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
     }
     case WM_CAPTURECHANGED: {
-        s_mousedowns = 0;
         ClipCursor(nullptr);
         return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
     }
@@ -327,6 +330,71 @@ static int WINAPI LegacyGetSystemMetrics(_In_ int nIndex)
 
 // ================================================================================================
 
+static void PeekMessageDebug(LPMSG lpMsg, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg)
+{
+    if (wRemoveMsg & PM_REMOVE)
+        s_log << "PeekMessageA: removed";
+    else
+        s_log << "PeekMessageA: peeked";
+    s_log << " wMsgFilterMin: 0x" << std::hex << wMsgFilterMin << " wMsgFilterMax: 0x"
+          << wMsgFilterMax << " msg: ";
+
+#define DECLARE_WM(x) \
+    case x: \
+        s_log << #x << " "; \
+        break;
+
+    switch (lpMsg->message) {
+#include "WM.inl"
+    default:
+        s_log << "0x" << std::hex << lpMsg->message << " ";
+        break;
+    }
+#undef DECLARE_WM
+
+    s_log << std::hex << "wParam: 0x" << lpMsg->wParam << " lParam: 0x" << lpMsg->lParam << std::endl;
+}
+
+// ================================================================================================
+
+static BOOL WINAPI LegacyPeekMessage(_Out_ LPMSG lpMsg, _In_opt_ HWND hWnd, _In_ UINT wMsgFilterMin,
+                                     _In_ UINT wMsgFilterMax, _In_ UINT wRemoveMsg)
+{
+    BOOL result = s_peekMessageHook->original()(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
+    if (result == FALSE)
+        return FALSE;
+
+//#define LEGACY_PEEKMSG_LOG
+//#define LEGACY_PEEKMSG_LOG_VERBOSE
+#if defined(LEGACY_PEEKMSG_LOG) && defined(LEGACY_PEEKMSG_LOG_VERBOSE)
+    PeekMessageDebug(lpMsg, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
+#endif
+
+    if (!(wRemoveMsg & PM_REMOVE))
+        return result;
+
+    switch (lpMsg->message) {
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDBLCLK:
+    case WM_LBUTTONUP: {
+        bool down = lpMsg->wParam & MK_LBUTTON;
+        s_log << "PeekMessageA: Handled suppressed LMB " << (down ? "down" : "up") << std::endl;
+        LegacyHandleLMB(hWnd, down);
+        break;
+    }
+
+#if defined(LEGACY_PEEKMSG_LOG) && !defined(LEGACY_PEEKMSG_LOG_VERBOSE)
+    default:
+        PeekMessageDebug(lpMsg, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
+        break;
+#endif
+    }
+
+    return result;
+}
+
+// ================================================================================================
+
 static VOID WINAPI LegacyOutputDebugString(_In_opt_ LPCSTR lpOutputString)
 {
     // Legacy.exe has some (limited) debug information available. Also, the gog.com version of
@@ -400,6 +468,7 @@ bool Win32InitHooks()
     MAKE_HOOK(L"User32.dll", "SetMenu", LegacySetMenu, s_setMenuHook);
     MAKE_HOOK(L"User32.dll", "LoadMenuA", LegacyLoadMenu, s_loadMenuHook);
     MAKE_HOOK(L"User32.dll", "GetSystemMetrics", LegacyGetSystemMetrics, s_getSystemMetricsHook);
+    MAKE_HOOK(L"User32.dll", "PeekMessageA", LegacyPeekMessage, s_peekMessageHook);
     MAKE_HOOK(L"Kernel32.dll", "OutputDebugStringA", LegacyOutputDebugString, s_outputDebugStringHook);
     return true;
 }
@@ -419,5 +488,6 @@ void Win32DeInitHooks()
     delete s_setMenuHook;
     delete s_loadMenuHook;
     delete s_getSystemMetricsHook;
+    delete s_peekMessageHook;
     delete s_outputDebugStringHook;
 }
