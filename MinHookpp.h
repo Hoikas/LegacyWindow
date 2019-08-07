@@ -49,6 +49,7 @@ public:
 
 public:
     static std::tuple<MH_STATUS, MHpp_Hook*> Create(LPCWSTR module, LPCSTR function, Args replacement);
+    static MHpp_Hook* CreateFake(Args funcptr);
 };
 
 // ================================================================================================
@@ -87,6 +88,14 @@ std::tuple<MH_STATUS, MHpp_Hook<Args>*> MHpp_Hook<Args>::Create(LPCWSTR module, 
 // ================================================================================================
 
 template<typename Args>
+MHpp_Hook<Args>* MHpp_Hook<Args>::CreateFake(Args funcptr)
+{
+    return new MHpp_Hook<Args>(funcptr, funcptr, funcptr);
+}
+
+// ================================================================================================
+
+template<typename Args>
 inline bool MakeHook(LPCWSTR module, LPCSTR func, Args hook, MHpp_Hook<Args>*& out)
 {
     // Crap... std::ofstream won't print out wchar strings.
@@ -106,8 +115,42 @@ inline bool MakeHook(LPCWSTR module, LPCSTR func, Args hook, MHpp_Hook<Args>*& o
 
 // ================================================================================================
 
+template<typename Args>
+inline bool MakeHookFake(LPCWSTR module, LPCSTR func, MHpp_Hook<Args>*& out)
+{
+    // Crap... std::ofstream won't print out wchar strings.
+    char module_temp[MAX_PATH];
+    WideCharToMultiByte(CP_UTF8, 0, module, -1, module_temp, sizeof(module_temp), nullptr, nullptr);
+
+    s_log << "Attempting to make fake hook object for  " << module_temp << "!" << func << std::endl;
+
+    HMODULE hMod = LoadLibraryW(module);
+    if (!hMod) {
+        s_log << "ERROR: LoadLibraryW failed!" << std::endl;
+        return false;
+    }
+
+    FARPROC proc = GetProcAddress(hMod, func);
+    if (!proc) {
+        s_log << "ERROR: GetProcAddress failed!" << std::endl;
+        FreeLibrary(hMod);
+        return false;
+    }
+
+    out = MHpp_Hook<Args>::CreateFake((Args)proc);
+    return true;
+}
+
+// ================================================================================================
+
 #define MAKE_HOOK(m, f, r, t) \
     if (!MakeHook(m, f, r, t)) { \
+        ExitProcess(1); \
+        return false; \
+    }
+
+#define MAKE_HOOKF(m, f, r, t) \
+    if (!MakeHookFake(m, f, t)) { \
         ExitProcess(1); \
         return false; \
     }

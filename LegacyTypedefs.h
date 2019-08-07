@@ -68,5 +68,28 @@ typedef BOOL(WINAPI* FSetMenu)(_In_ HWND, _In_opt_ HMENU);
 typedef HMENU(WINAPI* FLoadMenu)(_In_opt_ HINSTANCE, _In_ LPCSTR);
 typedef int(WINAPI* FGetSystemMetrics)(_In_ int);
 typedef BOOL(WINAPI* FPeekMessage)(_Out_ LPMSG, _In_opt_ HWND, _In_ UINT, _In_ UINT, _In_ UINT);
+typedef BOOL(WINAPI* FDeleteMenu)(_In_ HMENU, _In_ UINT, _In_ UINT);
+
+// ================================================================================================
+
+// Now we enter deep into the mire.
+#ifndef WM_UAHDESTROYWINDOW
+#define WM_UAHDESTROYWINDOW 0x90
+#endif
+#ifndef WM_UAHDRAWMENU
+#define WM_UAHDRAWMENU 0x91
+#endif
+#ifndef WM_UAHDRAWMENUITEM
+#define WM_UAHDRAWMENUITEM 0x92
+#endif
+#ifndef WM_UAHINITMENU
+#define WM_UAHINITMENU 0x93
+#endif
+#ifndef WM_UAHMEASUREMENUITEM
+#define WM_UAHMEASUREMENUITEM 0x94
+#endif
+#ifndef WM_UAHNCPAINTMENUPOPUP
+#define WM_UAHNCPAINTMENUPOPUP 0x95
+#endif
 
 #endif
