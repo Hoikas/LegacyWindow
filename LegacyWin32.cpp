@@ -32,6 +32,8 @@
 enum
 {
     e_overrideWindowRect = (1<<0),
+    e_leftMouseDown = (1<<1),
+    e_mouseDragging = (1<<2),
 };
 
 // ================================================================================================
@@ -42,6 +44,7 @@ static WNDPROC s_legacyWndProc = nullptr;
 static HWND s_legacyHWND;
 static HMENU s_legacyMenu = nullptr;
 static POINT s_gameResolution{ 640, 480 };
+static POINT s_lastLmbDown{ 0 };
 static uint32_t s_flags = 0;
 
 static MHpp_Hook<FRegisterClassExA>* s_registerClassHook = nullptr;
@@ -60,17 +63,29 @@ static MHpp_Hook<FPeekMessage>* s_peekMessageHook = nullptr;
 
 // ================================================================================================
 
-static void LegacyHandleLMB(HWND wnd, bool down)
+static void LegacyHandleLMB(HWND wnd, bool down, short x, short y)
 {
     if (down) {
-        RECT rect;
-        s_getClientRectHook->original()(wnd, &rect);
-        MapWindowPoints(wnd, HWND_DESKTOP, (LPPOINT)& rect, 2);
-        ClipCursor(&rect);
-        SetCapture(wnd);
+        if (!(s_flags & e_leftMouseDown)) {
+            s_flags |= e_leftMouseDown;
+            s_lastLmbDown = { x, y };
+            MapWindowPoints(wnd, HWND_DESKTOP, &s_lastLmbDown, 1);
+        } else if (!(s_flags & e_mouseDragging)) {
+            if (DragDetect(wnd, s_lastLmbDown) != FALSE) {
+                s_flags |= e_mouseDragging;
+                RECT rect{ 0 };
+                s_getClientRectHook->original()(wnd, &rect);
+                MapWindowPoints(wnd, HWND_DESKTOP, (LPPOINT)& rect, 2);
+                ClipCursor(&rect);
+                SetCapture(wnd);
+            }
+        }
     } else {
-        ClipCursor(nullptr);
-        ReleaseCapture();
+        s_flags &= ~e_leftMouseDown;
+        if (s_flags & e_mouseDragging) {
+            s_flags &= ~e_mouseDragging;
+            ReleaseCapture();
+        }
     }
 }
 
@@ -137,9 +152,12 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
     // Ensure the cursor does not do weird stuff when we're panning
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK:
-    case WM_LBUTTONUP: {
-        LegacyHandleLMB(wnd, (wParam & MK_LBUTTON));
-        return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
+    case WM_LBUTTONUP:
+    case WM_MOUSEMOVE:
+    {
+        LegacyHandleLMB(wnd, (wParam & MK_LBUTTON), GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        // WM_MOUSEMOVE is spammy, so no debug logging.
+        return CallWindowProcA(s_legacyWndProc, wnd, msg, wParam, lParam);
     }
     case WM_CAPTURECHANGED: {
         ClipCursor(nullptr);
@@ -163,7 +181,6 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
 #ifdef LEGACY_WM_DEBUG_LOG
     // These are called so frequently the log is useless.
     case WM_NCHITTEST:
-    case WM_MOUSEMOVE:
     case WM_SETCURSOR:
     case WM_ENTERIDLE:
         return CallWindowProcA(s_legacyWndProc, wnd, msg, wParam, lParam);
@@ -431,10 +448,11 @@ static BOOL WINAPI LegacyPeekMessage(_Out_ LPMSG lpMsg, _In_opt_ HWND hWnd, _In_
     switch (lpMsg->message) {
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK:
-    case WM_LBUTTONUP: {
+    case WM_LBUTTONUP:
+    case WM_MOUSEMOVE: {
         bool down = lpMsg->wParam & MK_LBUTTON;
         s_log << "PeekMessageA: Handled suppressed LMB " << (down ? "down" : "up") << std::endl;
-        LegacyHandleLMB(hWnd, down);
+        LegacyHandleLMB(hWnd, down, GET_X_LPARAM(lpMsg->lParam), GET_Y_LPARAM(lpMsg->lParam));
         break;
     }
 
