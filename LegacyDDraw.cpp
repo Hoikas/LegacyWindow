@@ -22,6 +22,7 @@
 #include "LegacyWindow.h"
 
 #include <fstream>
+#include <mutex>
 #include <thread>
 
 #include "DLL.h"
@@ -32,13 +33,20 @@
 
 struct PrimarySurface
 {
-    LPDIRECTDRAWSURFACE m_proxySurface;
-    uint32_t m_flags;
+    LPDIRECTDRAWSURFACE m_proxySurface{ 0 };
+    uint32_t m_flags{ 0 };
+    std::mutex m_lock;
+    HDC m_frameDC{ 0 };
+    HBITMAP m_frameBitmap{ 0 };
+    BITMAPINFO m_bitmapInfo{ 0 };
 };
 
 enum
 {
-    e_proxySurfaceDirty = (1<<0),
+    e_mainSurfaceDirty = (1<<0),
+    e_wantQuit = (1<<1),
+    e_ddrawSurfacesAcquired = (1<<2),
+    e_gdiObjectsAcquired = (1<<3),
 };
 
 static void LegacyDrawThread();
@@ -46,7 +54,7 @@ static void LegacyDrawThread();
 // ================================================================================================
 
 extern std::ofstream s_log;
-static PrimarySurface* s_primarySurface = nullptr;
+static PrimarySurface s_primarySurface;
 static std::thread s_drawThread;
 
 static MHpp_Hook<FDirectDrawCreate>* s_ddrawCreateHook = nullptr;
@@ -61,6 +69,8 @@ static FDirectDrawSurfaceUnlock s_ddrawSurfaceUnlock = nullptr;
 static FDirectDrawCreateSurface s_ddrawCreateSurface = nullptr;
 static FDirectDrawSetCooperativeLevel s_ddrawSetCooperativeLevel = nullptr;
 static FDirectDrawSetDisplayMode s_ddrawSetDisplayMode = nullptr;
+
+constexpr size_t PIXEL_COUNT = 640 * 480;
 
 // ================================================================================================
 
@@ -85,8 +95,10 @@ static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceBlt(LPDIRECTDRAWSURFACE self,
     // appears to be unused
     HRESULT result = s_ddrawSurfaceBlt(self, lpDestRect, lpDDSrcSurface, lpSrcRect, dwFlags,
                                        lpDDBltFX);
-    if (SUCCEEDED(result))
-        s_primarySurface->m_flags |= e_proxySurfaceDirty;
+    if (SUCCEEDED(result)) {
+        std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
+        s_primarySurface.m_flags |= e_mainSurfaceDirty;
+    }
     return result;
 }
 
@@ -100,8 +112,10 @@ static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceBltBatch(LPDIRECTDRAWSURFACE 
 {
     // appears to be unused
     HRESULT result = s_ddrawSurfaceBltBatch(self, lpDDBltBatch, dwCount, dwFlags);
-    if (SUCCEEDED(result))
-        s_primarySurface->m_flags |= e_proxySurfaceDirty;
+    if (SUCCEEDED(result)) {
+        std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
+        s_primarySurface.m_flags |= e_mainSurfaceDirty;
+    }
     return result;
 }
 
@@ -114,10 +128,12 @@ static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceBltFast(LPDIRECTDRAWSURFACE s
                                                            LPRECT lpSrcRect,
                                                            DWORD dwTrans)
 {
-    // *IS* used... seems to happen around the menus.
+    // *IS* used... seems to blt graphics onto dialog boxes.
     HRESULT result = s_ddrawSurfaceBltFast(self, dwX, dwY, lpDDSrcSurface, lpSrcRect, dwTrans);
-    if (SUCCEEDED(result))
-        s_primarySurface->m_flags |= e_proxySurfaceDirty;
+    if (SUCCEEDED(result)) {
+        std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
+        s_primarySurface.m_flags |= e_mainSurfaceDirty;
+    }
     return result;
 }
 
@@ -142,8 +158,10 @@ static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceLock(LPDIRECTDRAWSURFACE self
 static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceReleaseDC(LPDIRECTDRAWSURFACE self, HDC hDC)
 {
     HRESULT result = s_ddrawSurfaceReleaseDC(self, hDC);
-    if (SUCCEEDED(result))
-        s_primarySurface->m_flags |= e_proxySurfaceDirty;
+    if (SUCCEEDED(result)) {
+        std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
+        s_primarySurface.m_flags |= e_mainSurfaceDirty;
+    }
     return DD_OK;
 }
 
@@ -159,7 +177,8 @@ static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceUnlock(LPDIRECTDRAWSURFACE se
         return result;
     }
 
-    s_primarySurface->m_flags |= e_proxySurfaceDirty;
+    std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
+    s_primarySurface.m_flags |= e_mainSurfaceDirty;
     return DD_OK;
 }
 
@@ -213,14 +232,15 @@ static HRESULT STDMETHODCALLTYPE LegacyDDrawCreateSurface(LPDIRECTDRAW self, LPD
 
     // Setup hooking for the primary surface (may Gawd have mercy on us)
     if (want_primary) {
-        if (s_primarySurface) {
+        std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
+        if (s_primarySurface.m_flags & e_ddrawSurfacesAcquired) {
             s_log << "IDirectDraw::CreateSurface: trying to create the primary surface multiple times..."
                   << "Time to crash..." << std::endl;
             return DDERR_PRIMARYSURFACEALREADYEXISTS;
         }
 
-        s_primarySurface = new PrimarySurface;
-        s_primarySurface->m_proxySurface = *lplpDDSurface;
+        s_primarySurface.m_flags |= e_ddrawSurfacesAcquired;
+        s_primarySurface.m_proxySurface = *lplpDDSurface;
 
         // Offloaded drawing to a thread due to how slow it is...
         s_drawThread = std::thread{ LegacyDrawThread };
@@ -366,47 +386,41 @@ static void LegacyDrawThread()
     // when it's detected as dirty. We'll unlock it and do the 16bpp->32bpp conversion here to
     // prevent the main thread from stalling. We'll then use GDI to blit the resulting 32-bit
     // bitmap onto the active window's DC.
-    const size_t pixel_count = 640 * 480;
-    HDC memDC = CreateCompatibleDC(nullptr);
-    HBITMAP bitmap = CreateBitmap(640, 480, 1, 32, nullptr);
-    SelectObject(memDC, bitmap);
-
-    BITMAPINFO bmInfo = { 0 };
-    bmInfo.bmiHeader.biSize = sizeof(bmInfo.bmiHeader);
-    bmInfo.bmiHeader.biWidth = 640;
-    bmInfo.bmiHeader.biHeight = -480; // indicates top-down
-    bmInfo.bmiHeader.biPlanes = 1;
-    bmInfo.bmiHeader.biCompression = BI_RGB;
-    bmInfo.bmiHeader.biSizeImage = pixel_count * sizeof(uint32_t);
-    bmInfo.bmiHeader.biBitCount = 32;
-
-    uint16_t* rgb555buf = new uint16_t[pixel_count];
-    uint32_t* rgba8888buf = new uint32_t[pixel_count];
+    uint16_t* rgb555buf = new uint16_t[PIXEL_COUNT];
+    uint32_t* rgba8888buf = new uint32_t[PIXEL_COUNT];
     DDSURFACEDESC desc = { 0 };
     desc.dwSize = sizeof(desc);
 
-    // FIXME: quit race conditions...
     do {
-        if (s_primarySurface->m_flags & e_proxySurfaceDirty) {
-            HRESULT result = s_ddrawSurfaceLock(s_primarySurface->m_proxySurface, nullptr,
-                                                &desc, DDLOCK_SURFACEMEMORYPTR, nullptr);
-            if (result == DDERR_WASSTILLDRAWING) {
-                s_log << "TEMP DEBUG: dropping frame due to lock" << std::endl;
-                break;
-            } else if (FAILED(result)) {
+        s_primarySurface.m_lock.lock();
+        bool dirty = (s_primarySurface.m_flags & e_mainSurfaceDirty);
+        bool haveDdraw = (s_primarySurface.m_flags & e_ddrawSurfacesAcquired);
+        bool haveGdi = (s_primarySurface.m_flags & e_gdiObjectsAcquired);
+        bool quit = (s_primarySurface.m_flags & e_wantQuit);
+        s_primarySurface.m_lock.unlock();
+
+        if (quit)
+            break;
+
+        if (dirty && haveDdraw && haveGdi) {
+            HRESULT result = s_ddrawSurfaceLock(s_primarySurface.m_proxySurface, nullptr,
+                                                &desc, DDLOCK_WAIT, nullptr);
+            if (FAILED(result)) {
                 s_log << "LegacyDrawThread: ERROR failed to lock proxy surface 0x"
                     << std::hex << result << std::endl;
-                break;
+                Sleep(5);
+                continue;
             }
 
-            memcpy(rgb555buf, desc.lpSurface, pixel_count * sizeof(uint16_t));
-            s_ddrawSurfaceUnlock(s_primarySurface->m_proxySurface, desc.lpSurface);
+            memcpy(rgb555buf, desc.lpSurface, PIXEL_COUNT * sizeof(uint16_t));
+            s_ddrawSurfaceUnlock(s_primarySurface.m_proxySurface, desc.lpSurface);
 
-            // Do we care about this flag racing?
-            s_primarySurface->m_flags &= ~e_proxySurfaceDirty;
+            s_primarySurface.m_lock.lock();
+            s_primarySurface.m_flags &= ~e_mainSurfaceDirty;
+            s_primarySurface.m_lock.unlock();
 
             // Maybe at some point this should be vectorized?
-            for (size_t i = 0; i < pixel_count; ++i) {
+            for (size_t i = 0; i < PIXEL_COUNT; ++i) {
                 uint32_t pixel = rgb555buf[i];
                 uint32_t r = ((((pixel) & 0x1F) * 527) + 23) >> 6;
                 uint32_t g = ((((pixel >> 5) & 0x3F) * 259) + 33) >> 6;
@@ -414,23 +428,73 @@ static void LegacyDrawThread()
                 rgba8888buf[i] = ((r) | (g << 8) | (b << 16));
             }
 
-            SetDIBits(memDC, bitmap, 0, 480, rgba8888buf, &bmInfo, DIB_RGB_COLORS);
-        }
+            SetDIBits(s_primarySurface.m_frameDC, s_primarySurface.m_frameBitmap, 0, 480,
+                      rgba8888buf, &s_primarySurface.m_bitmapInfo, DIB_RGB_COLORS);
 
-        HWND wnd = Win32GetClientHWND();
-        HDC wndDC = GetDC(wnd);
-        // TODO: scaling?
-        if (BitBlt(wndDC, 0, 0, 640, 480, memDC, 0, 0, SRCCOPY) == FALSE) {
-            s_log << "LegacyDrawThread: ERROR: BitBlt failed!" << std::endl;
+            HWND wnd = Win32GetClientHWND();
+            HDC wndDC = GetDC(wnd);
+            // TODO: scaling?
+            if (BitBlt(wndDC, 0, 0, 640, 480, s_primarySurface.m_frameDC, 0, 0, SRCCOPY) == FALSE) {
+                s_log << "LegacyDrawThread: ERROR: BitBlt failed!" << std::endl;
+            }
+            ReleaseDC(wnd, wndDC);
         }
-        ReleaseDC(wnd, wndDC);
 
         // Don't saturate the CPU
         Sleep(10);
     } while(1);
+}
 
-    DeleteObject(bitmap);
-    DeleteDC(memDC);
+// ================================================================================================
+
+void DDrawForceDirty()
+{
+    s_primarySurface.m_lock.lock();
+    s_primarySurface.m_flags |= e_mainSurfaceDirty;
+    s_primarySurface.m_lock.unlock();
+}
+
+// ================================================================================================
+
+void DDrawAcquireGdiObjects()
+{
+    s_primarySurface.m_frameDC = CreateCompatibleDC(nullptr);
+    s_primarySurface.m_frameBitmap = CreateBitmap(640, 480, 1, 32, nullptr);
+    SelectObject(s_primarySurface.m_frameDC, s_primarySurface.m_frameBitmap);
+
+    s_primarySurface.m_bitmapInfo.bmiHeader.biSize = sizeof(s_primarySurface.m_bitmapInfo.bmiHeader);
+    s_primarySurface.m_bitmapInfo.bmiHeader.biWidth = 640;
+    s_primarySurface.m_bitmapInfo.bmiHeader.biHeight = -480; // indicates top-down
+    s_primarySurface.m_bitmapInfo.bmiHeader.biPlanes = 1;
+    s_primarySurface.m_bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    s_primarySurface.m_bitmapInfo.bmiHeader.biSizeImage = PIXEL_COUNT * sizeof(uint32_t);
+    s_primarySurface.m_bitmapInfo.bmiHeader.biBitCount = 32;
+
+    s_primarySurface.m_lock.lock();
+    s_primarySurface.m_flags |= e_gdiObjectsAcquired;
+    s_primarySurface.m_lock.unlock();
+}
+
+// ================================================================================================
+
+void DDrawReleaseGdiObjects()
+{
+    std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
+    if (s_primarySurface.m_flags & e_gdiObjectsAcquired) {
+        s_primarySurface.m_flags &= ~e_gdiObjectsAcquired;
+        DeleteObject(s_primarySurface.m_frameBitmap);
+        DeleteDC(s_primarySurface.m_frameDC);
+    }
+}
+
+// ================================================================================================
+
+void DDrawJoin()
+{
+    s_primarySurface.m_lock.lock();
+    s_primarySurface.m_flags |= e_wantQuit;
+    s_primarySurface.m_lock.unlock();
+    s_drawThread.join();
 }
 
 // ================================================================================================
@@ -445,7 +509,5 @@ bool DDrawInitHooks()
 
 void DDrawDeInitHooks()
 {
-    s_drawThread.join();
-
     delete s_ddrawCreateHook;
 }

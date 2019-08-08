@@ -22,6 +22,10 @@
 #ifndef __LEGACY_DLL_H
 #define __LEGACY_DLL_H
 
+void DDrawJoin();
+void DDrawForceDirty();
+void DDrawAcquireGdiObjects();
+void DDrawReleaseGdiObjects();
 bool DDrawInitHooks();
 void DDrawDeInitHooks();
 

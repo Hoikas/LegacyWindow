@@ -141,6 +141,9 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
         // Setup default flags
         s_flags |= e_overrideWindowRect;
 
+        // Setup objects for the draw thread
+        DDrawAcquireGdiObjects();
+
         return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
     }
 
@@ -175,6 +178,13 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
         s_flags &= ~e_overrideWindowRect;
         LRESULT result = CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
         s_flags |= e_overrideWindowRect;
+        return result;
+    }
+
+    case WM_DESTROY: {
+        DDrawJoin();
+        LRESULT result = CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
+        DDrawReleaseGdiObjects();
         return result;
     }
 
@@ -229,6 +239,7 @@ static void LegacyResizeGame()
           << GetMenu(s_legacyHWND) << " nWidth: " << std::dec << nWidth << std::dec << " nHeight: "
           << nHeight << std::endl;
     SetWindowPos(s_legacyHWND, HWND_TOP, -1, -1, nWidth, nHeight, (SWP_NOCOPYBITS | SWP_NOMOVE));
+    DDrawForceDirty();
 }
 
 // ================================================================================================
