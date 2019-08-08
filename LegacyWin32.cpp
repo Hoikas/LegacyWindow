@@ -41,6 +41,7 @@ extern std::ofstream s_log;
 static WNDPROC s_legacyWndProc = nullptr;
 static HWND s_legacyHWND;
 static HMENU s_legacyMenu = nullptr;
+static POINT s_gameResolution{ 640, 480 };
 static uint32_t s_flags = 0;
 
 static MHpp_Hook<FRegisterClassExA>* s_registerClassHook = nullptr;
@@ -201,6 +202,20 @@ static void LegacyFixMenu(HMENU menu)
 
 // ================================================================================================
 
+static void LegacyResizeGame()
+{
+    RECT window_rect{ 0, 0, s_gameResolution.x, s_gameResolution.y };
+    AdjustWindowRect(&window_rect, GetWindowLongA(s_legacyHWND, GWL_STYLE), TRUE);
+    int nWidth = window_rect.right - window_rect.left;
+    int nHeight = window_rect.bottom - window_rect.top;
+    s_log << "CreateWindowExA: resizing Legacy window for... hMenu: " << std::hex
+          << GetMenu(s_legacyHWND) << " nWidth: " << std::dec << nWidth << std::dec << " nHeight: "
+          << nHeight << std::endl;
+    SetWindowPos(s_legacyHWND, HWND_TOP, -1, -1, nWidth, nHeight, (SWP_NOCOPYBITS | SWP_NOMOVE));
+}
+
+// ================================================================================================
+
 static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpClassName,
                                       _In_opt_ LPCSTR lpWindowName, _In_ DWORD dwStyle,
                                       _In_ int X, _In_ int Y, _In_ int nWidth, _In_ int nHeight,
@@ -216,7 +231,7 @@ static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpCl
 
         // The game only requests a 640x480 window. Unfortunately, there is nonclient area, such as
         // title bars and menus to consider as well.
-        RECT window_rect{ 0, 0, nWidth, nHeight };
+        RECT window_rect{ 0, 0, s_gameResolution.x, s_gameResolution.y };
         AdjustWindowRect(&window_rect, dwStyle, hMenu != nullptr);
         nWidth = window_rect.right - window_rect.left;
         nHeight = window_rect.bottom - window_rect.top;
@@ -243,18 +258,7 @@ static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpCl
             HMENU menu = LoadMenuA(GetModuleHandleA(nullptr), MAKEINTRESOURCEA(101));
             LegacyFixMenu(menu);
             s_setMenuHook->original()(wnd, menu);
-
-            // Ensure the client window is the correct size.
-            s_getClientRectHook->original()(wnd, &window_rect);
-            AdjustWindowRect(&window_rect, dwStyle, TRUE);
-            nWidth = window_rect.right - window_rect.left;
-            nHeight = window_rect.bottom - window_rect.top;
-            s_log << "CreateWindowExA: resizing Legacy window for... hMenu: " << std::hex
-                  << menu << " nWidth: " << std::dec << nWidth << std::dec << " nHeight: "
-                  << nHeight << std::endl;
-            SetWindowPos(wnd, HWND_TOP, -1, -1, nWidth, nHeight, (SWP_NOCOPYBITS | SWP_NOMOVE));
-
-            // Ensure menu is drawn
+            LegacyResizeGame();
             DrawMenuBar(wnd);
         }
 
