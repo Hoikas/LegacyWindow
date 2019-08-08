@@ -30,6 +30,8 @@ bool DDrawInitHooks();
 void DDrawDeInitHooks();
 
 HWND Win32GetClientHWND();
+POINT Win32LockClientSize();
+void Win32UnlockClientSize();
 bool Win32SetThreadCount(int nthreads);
 bool Win32InitHooks();
 void Win32DeInitHooks();

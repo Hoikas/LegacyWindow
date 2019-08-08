@@ -22,6 +22,8 @@
 #include "LegacyWindow.h"
 
 #include <fstream>
+#include <iterator>
+#include <mutex>
 
 #include "DLL.h"
 #include "LegacyTypedefs.h"
@@ -36,6 +38,8 @@ enum
     e_mouseDragging = (1<<2),
 };
 
+#define IDM_RESOLUTION_START 0x1000
+
 // ================================================================================================
 
 extern std::ofstream s_log;
@@ -43,7 +47,20 @@ extern std::ofstream s_log;
 static WNDPROC s_legacyWndProc = nullptr;
 static HWND s_legacyHWND;
 static HMENU s_legacyMenu = nullptr;
+static HMENU s_hookMenu = nullptr;
 static POINT s_gameResolution{ 640, 480 };
+static POINT s_gameResolutionOptions[] {
+    { 640, 480 },
+    { 800, 600 },
+    { 1024, 768 },
+    { 1280, 980 },
+    { 1400, 1050 },
+    { 1600, 1200 },
+    { 1920, 1440 },
+    { 2048, 1536 },
+    { 3200, 2400 },
+};
+static std::mutex s_gameResolutionLock;
 static POINT s_lastLmbDown{ 0 };
 static uint32_t s_flags = 0;
 
@@ -63,7 +80,7 @@ static MHpp_Hook<FPeekMessage>* s_peekMessageHook = nullptr;
 
 // ================================================================================================
 
-static void LegacyHandleLMB(HWND wnd, bool down, short x, short y)
+static void LegacyHandleLMB(HWND wnd, bool down, int x, int y)
 {
     if (down) {
         if (!(s_flags & e_leftMouseDown)) {
@@ -87,6 +104,46 @@ static void LegacyHandleLMB(HWND wnd, bool down, short x, short y)
             ReleaseCapture();
         }
     }
+}
+
+// ================================================================================================
+
+static void LegacyResizeGame()
+{
+    // Resize game window for the requested game resolution + nonclient area
+    RECT window_rect{ 0, 0, s_gameResolution.x, s_gameResolution.y };
+    AdjustWindowRect(&window_rect, GetWindowLongA(s_legacyHWND, GWL_STYLE), TRUE);
+    int nWidth = window_rect.right - window_rect.left;
+    int nHeight = window_rect.bottom - window_rect.top;
+    s_log << "CreateWindowExA: resizing Legacy window for... hMenu: " << std::hex
+        << GetMenu(s_legacyHWND) << " nWidth: " << std::dec << nWidth << std::dec << " nHeight: "
+        << nHeight << std::endl;
+    SetWindowPos(s_legacyHWND, HWND_TOP, -1, -1, nWidth, nHeight, (SWP_NOCOPYBITS | SWP_NOMOVE));
+
+    // Update resolution menu
+    MENUITEMINFOA info{ 0 };
+    info.cbSize = sizeof(info);
+    info.fMask = MIIM_STATE;
+    for (size_t i = 0; i < std::size(s_gameResolutionOptions); ++i) {
+        UINT item = IDM_RESOLUTION_START + i;
+        if (GetMenuItemInfoA(s_hookMenu, item, FALSE, &info) == FALSE) {
+            s_log << "LegacyResizeGame: ERROR! Failed to get menu item 0x" << std::hex << item << std::endl;
+            continue;
+        }
+        if (s_gameResolution.x == s_gameResolutionOptions[i].x &&
+            s_gameResolution.y == s_gameResolutionOptions[i].y) {
+            info.fState |= MFS_CHECKED;
+        } else {
+            info.fState &= ~MFS_CHECKED;
+        }
+        if (SetMenuItemInfoA(s_hookMenu, item, FALSE, &info) == FALSE) {
+            s_log << "LegacyResizeGame: ERROR! Failed to set menu item 0x" << std::hex << item << std::endl;
+        }
+    }
+
+    // Redraw everything
+    DrawMenuBar(s_legacyHWND);
+    DDrawForceDirty();
 }
 
 // ================================================================================================
@@ -158,9 +215,17 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
     case WM_LBUTTONUP:
     case WM_MOUSEMOVE:
     {
-        LegacyHandleLMB(wnd, (wParam & MK_LBUTTON), GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        int x = GET_X_LPARAM(lParam);
+        int y = GET_Y_LPARAM(lParam);
+        LegacyHandleLMB(wnd, (wParam & MK_LBUTTON), x, y);
+
+        // Translate mouse coordinates to the new window size.
+        x = (x * 640) / s_gameResolution.x;
+        y = (y * 480) / s_gameResolution.y;
+        LPARAM cursorPos = ((y & 0xFFFF) << 16 | (x & 0xFFFF));
+
         // WM_MOUSEMOVE is spammy, so no debug logging.
-        return CallWindowProcA(s_legacyWndProc, wnd, msg, wParam, lParam);
+        return CallWindowProcA(s_legacyWndProc, wnd, msg, wParam, cursorPos);
     }
     case WM_CAPTURECHANGED: {
         ClipCursor(nullptr);
@@ -179,6 +244,24 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
         LRESULT result = CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
         s_flags |= e_overrideWindowRect;
         return result;
+    }
+
+    case WM_COMMAND: {
+        if (HIWORD(wParam) == 0 && lParam == 0) {
+            WORD menuid = LOWORD(wParam);
+            if (menuid >= IDM_RESOLUTION_START &&
+                menuid <= IDM_RESOLUTION_START + std::size(s_gameResolutionOptions)) {
+                size_t idx = menuid - IDM_RESOLUTION_START;
+                if (s_gameResolution.x != s_gameResolutionOptions[idx].x &&
+                    s_gameResolution.y != s_gameResolutionOptions[idx].y) {
+                    std::lock_guard<std::mutex> _(s_gameResolutionLock);
+                    s_gameResolution = s_gameResolutionOptions[idx];
+                    LegacyResizeGame();
+                }
+                return 0;
+            }
+        }
+        return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
     }
 
     case WM_DESTROY: {
@@ -225,21 +308,39 @@ static void LegacyFixMenu(HMENU menu)
     // once it's moused over, however...
     HMENU hmCinematics = CreateMenu();
     AppendMenuA(menu, MF_POPUP, (UINT_PTR)hmCinematics, "Cinematics");
-}
 
-// ================================================================================================
+    // Menu for our settings
+    s_hookMenu = CreateMenu();
+    AppendMenuA(menu, MF_POPUP, (UINT_PTR)s_hookMenu, "Settings");
 
-static void LegacyResizeGame()
-{
-    RECT window_rect{ 0, 0, s_gameResolution.x, s_gameResolution.y };
-    AdjustWindowRect(&window_rect, GetWindowLongA(s_legacyHWND, GWL_STYLE), TRUE);
-    int nWidth = window_rect.right - window_rect.left;
-    int nHeight = window_rect.bottom - window_rect.top;
-    s_log << "CreateWindowExA: resizing Legacy window for... hMenu: " << std::hex
-          << GetMenu(s_legacyHWND) << " nWidth: " << std::dec << nWidth << std::dec << " nHeight: "
-          << nHeight << std::endl;
-    SetWindowPos(s_legacyHWND, HWND_TOP, -1, -1, nWidth, nHeight, (SWP_NOCOPYBITS | SWP_NOMOVE));
-    DDrawForceDirty();
+    // Resolution menu
+    HMENU hmResolution = CreateMenu();
+    AppendMenuA(s_hookMenu, MF_POPUP, (UINT_PTR)hmResolution, "Resolution");
+
+    int desktopX = s_getSystemMetricsHook->original()(SM_CXSCREEN);
+    int desktopY = s_getSystemMetricsHook->original()(SM_CYSCREEN);
+    for (size_t i = 0; i < std::size(s_gameResolutionOptions); ++i) {
+        UINT state = 0;
+
+        RECT window_rect{ 0, 0, s_gameResolutionOptions[i].x, s_gameResolutionOptions[i].y };
+        AdjustWindowRect(&window_rect, GetWindowLongA(s_legacyHWND, GWL_STYLE), TRUE);
+        if ((window_rect.right - window_rect.left) > desktopX ||
+            (window_rect.bottom - window_rect.top) > desktopY) {
+            state |= MFS_GRAYED;
+        }
+
+        char buf[128];
+        sprintf_s(buf, "%ux%u", s_gameResolutionOptions[i].x, s_gameResolutionOptions[i].y);
+
+        MENUITEMINFOA info{ 0 };
+        info.cbSize = sizeof(info);
+        info.fMask = (MIIM_FTYPE | MIIM_ID | MIIM_STATE | MIIM_STRING);
+        info.fType = (MFT_RADIOCHECK | MFT_STRING);
+        info.fState = state;
+        info.wID = IDM_RESOLUTION_START + i;
+        info.dwTypeData = buf;
+        InsertMenuItemA(hmResolution, i, TRUE, &info);
+    }
 }
 
 // ================================================================================================
@@ -345,6 +446,11 @@ static BOOL WINAPI LegacyGetCursorPos(_Out_ LPPOINT lpPoint)
         return FALSE;
     if (s_screenToClientHook->original()(s_legacyHWND, &pos) == FALSE)
         return FALSE;
+
+    // Legacy.exe operates at 640x480, so we need to translate our coordinates to that...
+    pos.x = (pos.x * 640) / s_gameResolution.x;
+    pos.y = (pos.y * 480) / s_gameResolution.y;
+
     *lpPoint = pos;
     return TRUE;
 }
@@ -491,6 +597,21 @@ static VOID WINAPI LegacyOutputDebugString(_In_opt_ LPCSTR lpOutputString)
 HWND Win32GetClientHWND()
 {
     return s_legacyHWND;
+}
+
+// ================================================================================================
+
+POINT Win32LockClientSize()
+{
+    s_gameResolutionLock.lock();
+    return s_gameResolution;
+}
+
+// ================================================================================================
+
+void Win32UnlockClientSize()
+{
+    s_gameResolutionLock.unlock();
 }
 
 // ================================================================================================

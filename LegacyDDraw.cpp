@@ -431,17 +431,28 @@ static void LegacyDrawThread()
             SetDIBits(s_primarySurface.m_frameDC, s_primarySurface.m_frameBitmap, 0, 480,
                       rgba8888buf, &s_primarySurface.m_bitmapInfo, DIB_RGB_COLORS);
 
-            HWND wnd = Win32GetClientHWND();
-            HDC wndDC = GetDC(wnd);
-            // TODO: scaling?
-            if (BitBlt(wndDC, 0, 0, 640, 480, s_primarySurface.m_frameDC, 0, 0, SRCCOPY) == FALSE) {
-                s_log << "LegacyDrawThread: ERROR: BitBlt failed!" << std::endl;
+            {
+                POINT resolution = Win32LockClientSize();
+                HWND wnd = Win32GetClientHWND();
+                HDC wndDC = GetDC(wnd);
+
+                SetStretchBltMode(wndDC, HALFTONE);
+                SetBrushOrgEx(wndDC, 0, 0, nullptr);
+
+                BOOL result = StretchBlt(wndDC, 0, 0, resolution.x, resolution.y,
+                                         s_primarySurface.m_frameDC, 0, 0, 640, 480,
+                                         SRCCOPY);
+                if (result == FALSE) {
+                    s_log << "LegacyDrawThread: ERROR: StretchBlt failed!" << std::endl;
+                }
+
+                ReleaseDC(wnd, wndDC);
+                Win32UnlockClientSize();
             }
-            ReleaseDC(wnd, wndDC);
         }
 
         // Don't saturate the CPU
-        Sleep(10);
+        Sleep(5);
     } while(1);
 }
 
