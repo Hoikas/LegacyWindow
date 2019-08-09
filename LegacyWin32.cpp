@@ -39,6 +39,8 @@ enum
 };
 
 #define IDM_RESOLUTION_START 0x1000
+#define IDM_SHOW_FPS 0x1100
+#define IDM_SHOW_FRAMETIME 0x1101
 
 // ================================================================================================
 
@@ -259,6 +261,25 @@ static LRESULT WINAPI LegacyWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
                     LegacyResizeGame();
                 }
                 return 0;
+            } else if (menuid == IDM_SHOW_FPS || menuid == IDM_SHOW_FRAMETIME) {
+                MENUITEMINFOA info{ 0 };
+                info.cbSize = sizeof(info);
+                info.fMask = MIIM_STATE;
+                GetMenuItemInfoA(s_hookMenu, menuid, FALSE, &info);
+
+                bool toggle = !(info.fState & MFS_CHECKED);
+                if (toggle)
+                    info.fState |= MFS_CHECKED;
+                else
+                    info.fState |= MFS_CHECKED;
+                SetMenuItemInfoA(s_hookMenu, menuid, FALSE, &info);
+                DrawMenuBar(wnd);
+
+                if (menuid == IDM_SHOW_FPS)
+                    DDrawShowFPS(toggle);
+                else
+                    DDrawShowFrameTime(toggle);
+                return 0;
             }
         }
         return CallWindowProcA(BaseWndProc, wnd, msg, wParam, lParam);
@@ -341,6 +362,10 @@ static void LegacyFixMenu(HMENU menu)
         info.dwTypeData = buf;
         InsertMenuItemA(hmResolution, i, TRUE, &info);
     }
+
+    AppendMenuA(s_hookMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuA(s_hookMenu, MF_STRING, IDM_SHOW_FPS, "Show FPS");
+    AppendMenuA(s_hookMenu, MF_STRING, IDM_SHOW_FRAMETIME, "Show Frame Time");
 }
 
 // ================================================================================================

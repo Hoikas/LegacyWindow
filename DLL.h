@@ -24,6 +24,8 @@
 
 void DDrawJoin();
 void DDrawForceDirty();
+void DDrawShowFPS(bool on);
+void DDrawShowFrameTime(bool on);
 void DDrawAcquireGdiObjects();
 void DDrawReleaseGdiObjects();
 bool DDrawInitHooks();

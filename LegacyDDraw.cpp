@@ -26,6 +26,7 @@
 #include <thread>
 
 #include "DLL.h"
+#include "LegacyTimer.h"
 #include "LegacyTypedefs.h"
 #include "MinHookpp.h"
 
@@ -39,6 +40,7 @@ struct PrimarySurface
     HDC m_frameDC{ 0 };
     HBITMAP m_frameBitmap{ 0 };
     BITMAPINFO m_bitmapInfo{ 0 };
+    HFONT m_font{ 0 };
 };
 
 enum
@@ -47,6 +49,8 @@ enum
     e_wantQuit = (1<<1),
     e_ddrawSurfacesAcquired = (1<<2),
     e_gdiObjectsAcquired = (1<<3),
+    e_showFps = (1<<4),
+    e_showFrameTime = (1<<5),
 };
 
 static void LegacyDrawThread();
@@ -219,6 +223,9 @@ static HRESULT STDMETHODCALLTYPE LegacyDDrawCreateSurface(LPDIRECTDRAW self, LPD
     if (want_primary) {
         s_log << "IDirectDraw::CreateSurface: overriding primary surface request" << std::endl;
         lpDDSurfaceDesc->ddsCaps.dwCaps &= ~DDSCAPS_PRIMARYSURFACE;
+        // Since we memcpy this surface regularly, don't place it in video card memory.
+        // THIS IS UUUGE FOR PERFORMANCE!!!
+        lpDDSurfaceDesc->ddsCaps.dwCaps |= DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN;
         lpDDSurfaceDesc->dwFlags |= DDSD_WIDTH | DDSD_HEIGHT;
         lpDDSurfaceDesc->dwWidth = 640;
         lpDDSurfaceDesc->dwHeight = 480;
@@ -371,6 +378,10 @@ static void LegacyDrawThread()
 {
     s_log << "LegacyDrawThread: in the saddle..." << std::endl;
 
+    Timer frame_timer;
+    uint32_t frame_count{ 0 };
+    float last_frame_time{ 0.f };
+
     // So, here's the story... The proxy surface in s_primarySurface is 16bpp -- which is required
     // by Legacy.exe. In the main game, this surface represents the screen, so no flipping or
     // anything else is required. In our case, the screen is 32bpp. We can blit the 16bpp proxy
@@ -392,17 +403,14 @@ static void LegacyDrawThread()
     desc.dwSize = sizeof(desc);
 
     do {
-        s_primarySurface.m_lock.lock();
-        bool dirty = (s_primarySurface.m_flags & e_mainSurfaceDirty);
-        bool haveDdraw = (s_primarySurface.m_flags & e_ddrawSurfacesAcquired);
-        bool haveGdi = (s_primarySurface.m_flags & e_gdiObjectsAcquired);
-        bool quit = (s_primarySurface.m_flags & e_wantQuit);
-        s_primarySurface.m_lock.unlock();
-
-        if (quit)
+        if (s_primarySurface.m_flags & e_wantQuit)
             break;
 
-        if (dirty && haveDdraw && haveGdi) {
+        if ((s_primarySurface.m_flags & e_ddrawSurfacesAcquired) &&
+            (s_primarySurface.m_flags & e_gdiObjectsAcquired) &&
+            (s_primarySurface.m_flags & e_mainSurfaceDirty)) {
+            frame_timer.start();
+
             HRESULT result = s_ddrawSurfaceLock(s_primarySurface.m_proxySurface, nullptr,
                                                 &desc, DDLOCK_WAIT, nullptr);
             if (FAILED(result)) {
@@ -436,23 +444,49 @@ static void LegacyDrawThread()
                 HWND wnd = Win32GetClientHWND();
                 HDC wndDC = GetDC(wnd);
 
+                // While the HALFTONE StretchBlt mode offers a slight improvement in visual
+                // quality (mostly when panning the screen), it has a slightly negative impact
+                // on performance. Perhaps it should be gated behind a flag?
                 SetStretchBltMode(wndDC, HALFTONE);
                 SetBrushOrgEx(wndDC, 0, 0, nullptr);
 
-                BOOL result = StretchBlt(wndDC, 0, 0, resolution.x, resolution.y,
-                                         s_primarySurface.m_frameDC, 0, 0, 640, 480,
-                                         SRCCOPY);
-                if (result == FALSE) {
+                if (StretchBlt(wndDC, 0, 0, resolution.x, resolution.y,
+                               s_primarySurface.m_frameDC, 0, 0, 640, 480,
+                               SRCCOPY) == FALSE)
                     s_log << "LegacyDrawThread: ERROR: StretchBlt failed!" << std::endl;
+
+                RECT text_rect{ 0, 0, resolution.x, 0 };
+                if (s_primarySurface.m_flags & e_showFrameTime) {
+                    char buf[64];
+                    int nChars = sprintf_s(buf, "FT: %.4fs", last_frame_time);
+
+                    SelectObject(wndDC, s_primarySurface.m_font);
+                    SetBkMode(wndDC, TRANSPARENT);
+                    SetTextColor(wndDC, RGB(252, 236, 3));
+                    DrawTextA(wndDC, buf, nChars, &text_rect, DT_NOCLIP | DT_LEFT);
+                }
+                if (s_primarySurface.m_flags & e_showFps) {
+                    char buf[64];
+                    unsigned fpsInst = (unsigned)(1.f / last_frame_time);
+                    unsigned fpsAvg = (unsigned)((float)frame_count / frame_timer.total());
+                    int nChars = sprintf_s(buf, "FPS: %u AVG: %u", fpsInst, fpsAvg);
+
+                    SelectObject(wndDC, s_primarySurface.m_font);
+                    SetBkMode(wndDC, TRANSPARENT);
+                    SetTextColor(wndDC, RGB(252, 236, 3));
+                    DrawTextA(wndDC, buf, nChars, &text_rect, DT_NOCLIP | DT_RIGHT);
                 }
 
                 ReleaseDC(wnd, wndDC);
                 Win32UnlockClientSize();
             }
-        }
 
-        // Don't saturate the CPU
-        Sleep(5);
+            last_frame_time = frame_timer.end();
+            frame_count++;
+        } else {
+            // not dirty, don't thrash the CPU
+            Sleep(5);
+        }
     } while(1);
 }
 
@@ -461,6 +495,32 @@ static void LegacyDrawThread()
 void DDrawForceDirty()
 {
     s_primarySurface.m_lock.lock();
+    s_primarySurface.m_flags |= e_mainSurfaceDirty;
+    s_primarySurface.m_lock.unlock();
+}
+
+// ================================================================================================
+
+void DDrawShowFPS(bool on)
+{
+    s_primarySurface.m_lock.lock();
+    if (on)
+        s_primarySurface.m_flags |= e_showFps;
+    else
+        s_primarySurface.m_flags &= ~e_showFps;
+    s_primarySurface.m_flags |= e_mainSurfaceDirty;
+    s_primarySurface.m_lock.unlock();
+}
+
+// ================================================================================================
+
+void DDrawShowFrameTime(bool on)
+{
+    s_primarySurface.m_lock.lock();
+    if (on)
+        s_primarySurface.m_flags |= e_showFrameTime;
+    else
+        s_primarySurface.m_flags &= ~e_showFrameTime;
     s_primarySurface.m_flags |= e_mainSurfaceDirty;
     s_primarySurface.m_lock.unlock();
 }
@@ -481,6 +541,16 @@ void DDrawAcquireGdiObjects()
     s_primarySurface.m_bitmapInfo.bmiHeader.biSizeImage = PIXEL_COUNT * sizeof(uint32_t);
     s_primarySurface.m_bitmapInfo.bmiHeader.biBitCount = 32;
 
+    LOGFONTA font{ 0 };
+    HDC tempDC = GetDC(HWND_DESKTOP);
+    font.lfHeight = -MulDiv(26, GetDeviceCaps(tempDC, LOGPIXELSY), 72);
+    ReleaseDC(HWND_DESKTOP, tempDC);
+    font.lfWeight = FW_BOLD;
+    font.lfCharSet = ANSI_CHARSET;
+    font.lfQuality = CLEARTYPE_QUALITY;
+    font.lfPitchAndFamily = FIXED_PITCH;
+    s_primarySurface.m_font = CreateFontIndirectA(&font);
+
     s_primarySurface.m_lock.lock();
     s_primarySurface.m_flags |= e_gdiObjectsAcquired;
     s_primarySurface.m_lock.unlock();
@@ -493,6 +563,7 @@ void DDrawReleaseGdiObjects()
     std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
     if (s_primarySurface.m_flags & e_gdiObjectsAcquired) {
         s_primarySurface.m_flags &= ~e_gdiObjectsAcquired;
+        DeleteObject(s_primarySurface.m_font);
         DeleteObject(s_primarySurface.m_frameBitmap);
         DeleteDC(s_primarySurface.m_frameDC);
     }
