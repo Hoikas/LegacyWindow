@@ -69,6 +69,7 @@ typedef HMENU(WINAPI* FLoadMenu)(_In_opt_ HINSTANCE, _In_ LPCSTR);
 typedef int(WINAPI* FGetSystemMetrics)(_In_ int);
 typedef BOOL(WINAPI* FPeekMessage)(_Out_ LPMSG, _In_opt_ HWND, _In_ UINT, _In_ UINT, _In_ UINT);
 typedef BOOL(WINAPI* FDeleteMenu)(_In_ HMENU, _In_ UINT, _In_ UINT);
+typedef INT_PTR(WINAPI* FDialogBoxParam)(_In_opt_ HINSTANCE, LPCSTR, HWND, DLGPROC, LPARAM);
 
 // ================================================================================================
 

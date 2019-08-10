@@ -42,14 +42,23 @@ enum
 #define IDM_SHOW_FPS 0x1100
 #define IDM_SHOW_FRAMETIME 0x1101
 
+struct _DialogWndData
+{
+    HINSTANCE m_hInstance{ };
+    LPCSTR m_template{ };
+    DLGPROC m_dlgproc{ };
+    LPARAM m_initParam{ };
+};
+
 // ================================================================================================
 
 extern std::ofstream s_log;
 
-static WNDPROC s_legacyWndProc = nullptr;
-static HWND s_legacyHWND;
-static HMENU s_legacyMenu = nullptr;
-static HMENU s_hookMenu = nullptr;
+static WNDPROC s_legacyWndProc{ };
+static HWND s_legacyHWND{ };
+static HWND s_legacyDialog{  };
+static HMENU s_legacyMenu{ };
+static HMENU s_hookMenu{ };
 static POINT s_gameResolution{ 640, 480 };
 static POINT s_gameResolutionOptions[] {
     { 640, 480 },
@@ -64,7 +73,7 @@ static POINT s_gameResolutionOptions[] {
 };
 static std::mutex s_gameResolutionLock;
 static POINT s_lastLmbDown{ 0 };
-static uint32_t s_flags = 0;
+static uint32_t s_flags{ 0 };
 
 static MHpp_Hook<FRegisterClassExA>* s_registerClassHook = nullptr;
 static MHpp_Hook<FCreateWindowExA>* s_createWindowHook = nullptr;
@@ -79,6 +88,7 @@ static MHpp_Hook<FSetMenu>* s_setMenuHook = nullptr;
 static MHpp_Hook<FLoadMenu>* s_loadMenuHook = nullptr;
 static MHpp_Hook<FGetSystemMetrics>* s_getSystemMetricsHook = nullptr;
 static MHpp_Hook<FPeekMessage>* s_peekMessageHook = nullptr;
+static MHpp_Hook<FDialogBoxParam>* s_dialogBoxParamHook = nullptr;
 
 // ================================================================================================
 
@@ -379,7 +389,7 @@ static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpCl
     s_log << "CreateWindowExA: requested... dwExStyle: 0x" << std::hex << dwExStyle
           << " dwStyle: 0x" << std::hex << dwStyle << " hMenu: 0x" << hMenu << std::endl;
 
-    if (lpWindowName && strcmp(lpWindowName, "Legacy of Time") == 0) {
+    if (!s_legacyHWND && lpWindowName && strcmp(lpWindowName, "Legacy of Time") == 0) {
         dwStyle |= WS_CAPTION;
         dwStyle &= ~WS_POPUP;
 
@@ -415,6 +425,10 @@ static HWND WINAPI LegacyCreateWindow(_In_ DWORD dwExStyle, _In_opt_ LPCSTR lpCl
             LegacyResizeGame();
             DrawMenuBar(wnd);
         }
+
+        // At this point, all game init is complete and we are at the main menu. Any DirectDraw
+        // surfaces requested at this point are ephemeral and are used to render images to HWNDs.
+        DDrawSignalInitComplete();
 
         return wnd;
     } else if (lpClassName && strncmp(lpClassName, "QTIdle", 6) == 0) {
@@ -610,6 +624,73 @@ static BOOL WINAPI LegacyPeekMessage(_Out_ LPMSG lpMsg, _In_opt_ HWND hWnd, _In_
 
 // ================================================================================================
 
+static BOOL WINAPI LegacyDialogProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    _DialogWndData* data = (_DialogWndData*)GetWindowLongA(wnd, GWL_USERDATA);
+
+    switch (msg) {
+    case WM_INITDIALOG: {
+        SetWindowLongA(wnd, GWL_USERDATA, lParam);
+        data = (_DialogWndData*)lParam;
+        BOOL result = data->m_dlgproc(wnd, msg, wParam, lParam);
+
+        // Dialog was shown at a screenspace location that would be the center of a 640x480 desktop.
+        // We can't assume anything, so we'll just redo the whole dealio.
+        RECT dlg_rect{ };
+        s_getWindowRectHook->original()(wnd, &dlg_rect);
+        POINT size{ (dlg_rect.right - dlg_rect.left), (dlg_rect.bottom - dlg_rect.top) };
+        POINT pos{ ((s_gameResolution.x / 2) - (size.x / 2)),
+                   ((s_gameResolution.y / 2) - (size.y / 2)) };
+        s_clientToScreenHook->original()(s_legacyHWND, &pos);
+        SetWindowPos(wnd, nullptr, pos.x, pos.y, -1, -1, SWP_NOSIZE | SWP_NOZORDER);
+
+        // When Legacy goes to BltFast the graphics, they are in screenspace... ugh.
+        // Options Menu (132) has an issue where the graphics are blitted too high.???
+        int offsetX = s_getSystemMetricsHook->original()(SM_CXDLGFRAME);
+        int offsetY = 0;
+
+        if (data->m_template == MAKEINTRESOURCEA(132)) {
+            offsetY -= s_getSystemMetricsHook->original()(SM_CYDLGFRAME);
+            offsetY -= s_getSystemMetricsHook->original()(SM_CYMENU);
+        }
+        DDrawSetBltOffset(dlg_rect.left + offsetX, dlg_rect.top + offsetY);
+
+        return result;
+    }
+    case WM_PAINT: {
+        HWND previous_target = DDrawBltToHWND(wnd);
+        BOOL result = data->m_dlgproc(wnd, msg, wParam, lParam);
+        DDrawBltToHWND(previous_target);
+        return result;
+    }
+    default:
+        if (!data) {
+            s_log << "LegacyDialogProc: Received WM 0x" << std::hex << msg
+                  << " before GWL_USERDATA was set... Dropping." << std::endl;
+            return FALSE;
+        }
+        return data->m_dlgproc(wnd, msg, wParam, lParam);
+    }
+}
+
+// ================================================================================================
+
+static INT_PTR WINAPI LegacyDialogBoxParam(_In_opt_ HINSTANCE hInstance,
+                                           _In_ LPCSTR lpTemplateName,
+                                           _In_opt_ HWND hWndParent,
+                                           _In_opt_ DLGPROC lpDialogFunc,
+                                           _In_ LPARAM dwInitParam)
+{
+    // We're just replacing the DlgProc with our own. Unfortunately, dialogs are slightly different
+    // from other windows in how the procedures work. Hence the differences from CreateWindowExA.
+
+    _DialogWndData userdata{ hInstance, lpTemplateName, lpDialogFunc, dwInitParam };
+    return s_dialogBoxParamHook->original()(hInstance, lpTemplateName, hWndParent,
+                                            LegacyDialogProc, (LPARAM)&userdata);
+}
+
+// ================================================================================================
+
 static VOID WINAPI LegacyOutputDebugString(_In_opt_ LPCSTR lpOutputString)
 {
     // Legacy.exe has some (limited) debug information available. Also, the gog.com version of
@@ -699,6 +780,7 @@ bool Win32InitHooks()
     MAKE_HOOK(L"User32.dll", "LoadMenuA", LegacyLoadMenu, s_loadMenuHook);
     MAKE_HOOK(L"User32.dll", "GetSystemMetrics", LegacyGetSystemMetrics, s_getSystemMetricsHook);
     MAKE_HOOK(L"User32.dll", "PeekMessageA", LegacyPeekMessage, s_peekMessageHook);
+    MAKE_HOOK(L"User32.dll", "DialogBoxParamA", LegacyDialogBoxParam, s_dialogBoxParamHook);
     MAKE_HOOK(L"Kernel32.dll", "OutputDebugStringA", LegacyOutputDebugString, s_outputDebugStringHook);
     return true;
 }
@@ -719,5 +801,6 @@ void Win32DeInitHooks()
     delete s_loadMenuHook;
     delete s_getSystemMetricsHook;
     delete s_peekMessageHook;
+    delete s_dialogBoxParamHook;
     delete s_outputDebugStringHook;
 }

@@ -28,6 +28,9 @@ void DDrawShowFPS(bool on);
 void DDrawShowFrameTime(bool on);
 void DDrawAcquireGdiObjects();
 void DDrawReleaseGdiObjects();
+void DDrawSignalInitComplete();
+HWND DDrawBltToHWND(HWND wnd);
+void DDrawSetBltOffset(int x, int y);
 bool DDrawInitHooks();
 void DDrawDeInitHooks();
 

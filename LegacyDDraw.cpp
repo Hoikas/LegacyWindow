@@ -23,6 +23,7 @@
 
 #include <fstream>
 #include <mutex>
+#include <set>
 #include <thread>
 
 #include "DLL.h"
@@ -41,16 +42,19 @@ struct PrimarySurface
     HBITMAP m_frameBitmap{ 0 };
     BITMAPINFO m_bitmapInfo{ 0 };
     HFONT m_font{ 0 };
+    HWND m_bltTarget{ };
+    POINT m_bltOffset{ };
 };
 
 enum
 {
     e_mainSurfaceDirty = (1<<0),
     e_wantQuit = (1<<1),
-    e_ddrawSurfacesAcquired = (1<<2),
+    e_ddrawPrimarySurfaceAcquired = (1<<2),
     e_gdiObjectsAcquired = (1<<3),
     e_showFps = (1<<4),
     e_showFrameTime = (1<<5),
+    e_initComplete = (1<<6),
 };
 
 static void LegacyDrawThread();
@@ -59,9 +63,12 @@ static void LegacyDrawThread();
 
 extern std::ofstream s_log;
 static PrimarySurface s_primarySurface;
+static std::set<LPDIRECTDRAWSURFACE> s_ephemeralSurfaces;
 static std::thread s_drawThread;
 
 static MHpp_Hook<FDirectDrawCreate>* s_ddrawCreateHook = nullptr;
+
+static FUnknownRelease s_unknownRelease = nullptr;
 
 static FDirectDrawSurfaceBlt s_ddrawSurfaceBlt = nullptr;
 static FDirectDrawSurfaceBltBatch s_ddrawSurfaceBltBatch = nullptr;
@@ -89,38 +96,27 @@ static inline void SwapImplementation(LPVOID* vftable, size_t index, Args& origi
 
 // ================================================================================================
 
-static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceBlt(LPDIRECTDRAWSURFACE self,
-                                                       LPRECT lpDestRect,
-                                                       LPDIRECTDRAWSURFACE lpDDSrcSurface,
-                                                       LPRECT lpSrcRect,
-                                                       DWORD dwFlags,
-                                                       LPDDBLTFX lpDDBltFX)
+static HRESULT STDMETHODCALLTYPE LegacyStubSurfaceBlt(LPDIRECTDRAWSURFACE self,
+                                                      LPRECT lpDestRect,
+                                                      LPDIRECTDRAWSURFACE lpDDSrcSurface,
+                                                      LPRECT lpSrcRect,
+                                                      DWORD dwFlags,
+                                                      LPDDBLTFX lpDDBltFX)
 {
-    // appears to be unused
-    HRESULT result = s_ddrawSurfaceBlt(self, lpDestRect, lpDDSrcSurface, lpSrcRect, dwFlags,
-                                       lpDDBltFX);
-    if (SUCCEEDED(result)) {
-        std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
-        s_primarySurface.m_flags |= e_mainSurfaceDirty;
-    }
-    return result;
+    s_log << "IDirectDrawSurface::Blt: ERROR! Not Implemented..." << std::endl;
+    return DDERR_UNSUPPORTED;
 }
 
 
 // ================================================================================================
 
-static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceBltBatch(LPDIRECTDRAWSURFACE self,
-                                                            LPDDBLTBATCH lpDDBltBatch,
-                                                            DWORD dwCount,
-                                                            DWORD dwFlags)
+static HRESULT STDMETHODCALLTYPE LegacyStubSurfaceBltBatch(LPDIRECTDRAWSURFACE self,
+                                                           LPDDBLTBATCH lpDDBltBatch,
+                                                           DWORD dwCount,
+                                                           DWORD dwFlags)
 {
-    // appears to be unused
-    HRESULT result = s_ddrawSurfaceBltBatch(self, lpDDBltBatch, dwCount, dwFlags);
-    if (SUCCEEDED(result)) {
-        std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
-        s_primarySurface.m_flags |= e_mainSurfaceDirty;
-    }
-    return result;
+    s_log << "IDirectDrawSurface::BltBatch: ERROR! Not Implemented..." << std::endl;
+    return DDERR_UNSUPPORTED;
 }
 
 // ================================================================================================
@@ -132,13 +128,52 @@ static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceBltFast(LPDIRECTDRAWSURFACE s
                                                            LPRECT lpSrcRect,
                                                            DWORD dwTrans)
 {
-    // *IS* used... seems to blt graphics onto dialog boxes.
-    HRESULT result = s_ddrawSurfaceBltFast(self, dwX, dwY, lpDDSrcSurface, lpSrcRect, dwTrans);
-    if (SUCCEEDED(result)) {
+    auto it = s_ephemeralSurfaces.find(lpDDSrcSurface);
+    if (it != s_ephemeralSurfaces.end()) {
+        if (!s_primarySurface.m_bltTarget) {
+            s_log << "IDirectDrawSurface::BltFast: ERROR! No HWND available for blt..." << std::endl;
+            return DDERR_NOHWND;
+        }
+
+        // This is used to draw bitmaps to dialog boxes. In Windows versions before Vista, this worked
+        // great because this surface (generally) represented the GDI surface, which was responsible for
+        // all drawing. Not so much, now.
+        HDC srcDC;
+        HRESULT result = lpDDSrcSurface->GetDC(&srcDC);
+        if (FAILED(result)) {
+            s_log << "IDirectDrawSurface::BltFast: ERROR! lpDDSrcSurface->GetDC failed... 0x"
+                  << std::hex << result << std::endl;
+            return result;
+        }
+
+        int width = lpSrcRect->right - lpSrcRect->left;
+        int height = lpSrcRect->bottom - lpSrcRect->top;
+
+        int x = dwX - s_primarySurface.m_bltOffset.x;
+        int y = dwY - s_primarySurface.m_bltOffset.y;
+
+        HDC wndDC = GetDC(s_primarySurface.m_bltTarget);
+        BitBlt(wndDC, x, y, width, height, srcDC, lpSrcRect->left, lpSrcRect->top, SRCCOPY);
+        ReleaseDC(s_primarySurface.m_bltTarget, wndDC);
+
+        result = lpDDSrcSurface->ReleaseDC(srcDC);
+        if (FAILED(result)) {
+            s_log << "IDirectDrawSurface::BltFast: ERROR! lpDDSrcSurface->ReleaseDC failed... 0x"
+                  << std::hex << result << std::endl;
+            return result;
+        }
+        return DD_OK;
+    } else {
+        HRESULT result = s_ddrawSurfaceBltFast(self, dwX, dwY, lpDDSrcSurface, lpSrcRect, dwTrans);
+        if (FAILED(result)) {
+            s_log << "IDirectDrawSurface::BltFast: ERROR! 0x" << std::hex << result << std::endl;
+            return result;
+        }
+
         std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
         s_primarySurface.m_flags |= e_mainSurfaceDirty;
+        return DD_OK;
     }
-    return result;
 }
 
 // ================================================================================================
@@ -184,6 +219,16 @@ static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceUnlock(LPDIRECTDRAWSURFACE se
     std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
     s_primarySurface.m_flags |= e_mainSurfaceDirty;
     return DD_OK;
+}
+
+// ================================================================================================
+
+static ULONG STDMETHODCALLTYPE LegacyEphemeralSurfaceRelease(LPDIRECTDRAWSURFACE self)
+{
+    ULONG result = s_unknownRelease(self);
+    if (result == 0)
+        s_ephemeralSurfaces.erase(self);
+    return result;
 }
 
 // ================================================================================================
@@ -238,15 +283,15 @@ static HRESULT STDMETHODCALLTYPE LegacyDDrawCreateSurface(LPDIRECTDRAW self, LPD
     }
 
     // Setup hooking for the primary surface (may Gawd have mercy on us)
+    std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
     if (want_primary) {
-        std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
-        if (s_primarySurface.m_flags & e_ddrawSurfacesAcquired) {
+        if (s_primarySurface.m_flags & e_ddrawPrimarySurfaceAcquired) {
             s_log << "IDirectDraw::CreateSurface: trying to create the primary surface multiple times..."
                   << "Time to crash..." << std::endl;
             return DDERR_PRIMARYSURFACEALREADYEXISTS;
         }
 
-        s_primarySurface.m_flags |= e_ddrawSurfacesAcquired;
+        s_primarySurface.m_flags |= e_ddrawPrimarySurfaceAcquired;
         s_primarySurface.m_proxySurface = *lplpDDSurface;
 
         // Offloaded drawing to a thread due to how slow it is...
@@ -259,8 +304,8 @@ static HRESULT STDMETHODCALLTYPE LegacyDDrawCreateSurface(LPDIRECTDRAW self, LPD
         // 02: Release
         // 03: AddAttachedSurface
         // 04: AddOverlayDirtyRect
-        SwapImplementation(vftable, 5, s_ddrawSurfaceBlt, LegacyProxySurfaceBlt);
-        SwapImplementation(vftable, 6, s_ddrawSurfaceBltBatch, LegacyProxySurfaceBltBatch);
+        SwapImplementation(vftable, 5, s_ddrawSurfaceBlt, LegacyStubSurfaceBlt);
+        SwapImplementation(vftable, 6, s_ddrawSurfaceBltBatch, LegacyStubSurfaceBltBatch);
         SwapImplementation(vftable, 7, s_ddrawSurfaceBltFast, LegacyProxySurfaceBltFast);
         // 08: DeleteAttachedSurface
         // 09: EnumAttachedSurface
@@ -290,6 +335,16 @@ static HRESULT STDMETHODCALLTYPE LegacyDDrawCreateSurface(LPDIRECTDRAW self, LPD
         // 33: UpdateOverlay
         // 34: UpdateOverlayDisplay
         // 35: UpdateOverlayZOrder
+    }
+
+    // If all the main drawing surfaces have been created, this is an ephemeral surface that should
+    // never be blitted directly to the main surface.
+    if (s_primarySurface.m_flags & e_initComplete) {
+        s_ephemeralSurfaces.insert(*lplpDDSurface);
+
+        // IDirectDrawSurface VFTable
+        LPVOID* vftable = (LPVOID*)((int*)* lplpDDSurface)[0];
+        SwapImplementation(vftable, 2, s_unknownRelease, LegacyEphemeralSurfaceRelease);
     }
 
     return result;
@@ -406,7 +461,7 @@ static void LegacyDrawThread()
         if (s_primarySurface.m_flags & e_wantQuit)
             break;
 
-        if ((s_primarySurface.m_flags & e_ddrawSurfacesAcquired) &&
+        if ((s_primarySurface.m_flags & e_ddrawPrimarySurfaceAcquired) &&
             (s_primarySurface.m_flags & e_gdiObjectsAcquired) &&
             (s_primarySurface.m_flags & e_mainSurfaceDirty)) {
             frame_timer.start();
@@ -567,6 +622,30 @@ void DDrawReleaseGdiObjects()
         DeleteObject(s_primarySurface.m_frameBitmap);
         DeleteDC(s_primarySurface.m_frameDC);
     }
+}
+
+// ================================================================================================
+
+void DDrawSignalInitComplete()
+{
+    s_primarySurface.m_lock.lock();
+    s_primarySurface.m_flags |= e_initComplete;
+    s_primarySurface.m_lock.unlock();
+}
+
+// ================================================================================================
+
+HWND DDrawBltToHWND(HWND target)
+{
+    std::swap(s_primarySurface.m_bltTarget, target);
+    return target;
+}
+
+// ================================================================================================
+
+void DDrawSetBltOffset(int x, int y)
+{
+    s_primarySurface.m_bltOffset = { x, y };
 }
 
 // ================================================================================================
