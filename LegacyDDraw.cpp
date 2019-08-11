@@ -36,8 +36,9 @@
 struct PrimarySurface
 {
     LPDIRECTDRAWSURFACE m_proxySurface{ 0 };
+    std::recursive_mutex m_surfaceMut;
     uint32_t m_flags{ 0 };
-    std::mutex m_lock;
+    std::mutex m_flagsMut;
     HDC m_frameDC{ 0 };
     HBITMAP m_frameBitmap{ 0 };
     BITMAPINFO m_bitmapInfo{ 0 };
@@ -73,6 +74,7 @@ static FUnknownRelease s_unknownRelease = nullptr;
 static FDirectDrawSurfaceBlt s_ddrawSurfaceBlt = nullptr;
 static FDirectDrawSurfaceBltBatch s_ddrawSurfaceBltBatch = nullptr;
 static FDirectDrawSurfaceBltFast s_ddrawSurfaceBltFast = nullptr;
+static FDirectDrawSurfaceGetDC s_ddrawSurfaceGetDC = nullptr;
 static FDirectDrawSurfaceLock s_ddrawSurfaceLock = nullptr;
 static FDirectDrawSurfaceReleaseDC s_ddrawSurfaceReleaseDC = nullptr;
 static FDirectDrawSurfaceUnlock s_ddrawSurfaceUnlock = nullptr;
@@ -164,16 +166,34 @@ static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceBltFast(LPDIRECTDRAWSURFACE s
         }
         return DD_OK;
     } else {
+        s_primarySurface.m_surfaceMut.lock();
         HRESULT result = s_ddrawSurfaceBltFast(self, dwX, dwY, lpDDSrcSurface, lpSrcRect, dwTrans);
+        s_primarySurface.m_surfaceMut.unlock();
         if (FAILED(result)) {
             s_log << "IDirectDrawSurface::BltFast: ERROR! 0x" << std::hex << result << std::endl;
             return result;
         }
 
-        std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
+        std::lock_guard<std::mutex> _{ s_primarySurface.m_flagsMut };
         s_primarySurface.m_flags |= e_mainSurfaceDirty;
         return DD_OK;
     }
+}
+
+// ================================================================================================
+
+static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceGetDC(LPDIRECTDRAWSURFACE self, HDC FAR* lphDC)
+{
+    s_primarySurface.m_surfaceMut.lock();
+    HRESULT result = s_ddrawSurfaceGetDC(self, lphDC);
+    if (FAILED(result)) {
+        s_primarySurface.m_surfaceMut.unlock();
+        s_log << "IDirectDrawSurface::Lock: Proxy surface GetDC failed 0x" << std::hex << result << std::endl;
+        return result;
+    }
+
+    // Failure to release recurive mutex is intentional.
+    return result;
 }
 
 // ================================================================================================
@@ -184,11 +204,15 @@ static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceLock(LPDIRECTDRAWSURFACE self
                                                         DWORD dwFlags,
                                                         HANDLE hEvent)
 {
+    s_primarySurface.m_surfaceMut.lock();
     HRESULT result = s_ddrawSurfaceLock(self, lpDestRect, lpDDSurfaceDesc, dwFlags, hEvent);
     if (FAILED(result)) {
+        s_primarySurface.m_surfaceMut.unlock();
         s_log << "IDirectDrawSurface::Lock: Proxy surface lock failed 0x" << std::hex << result << std::endl;
         return result;
     }
+
+    // Failure to release recurive mutex is intentional.
     return result;
 }
 
@@ -198,7 +222,8 @@ static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceReleaseDC(LPDIRECTDRAWSURFACE
 {
     HRESULT result = s_ddrawSurfaceReleaseDC(self, hDC);
     if (SUCCEEDED(result)) {
-        std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
+        s_primarySurface.m_surfaceMut.unlock();
+        std::lock_guard<std::mutex> _(s_primarySurface.m_flagsMut);
         s_primarySurface.m_flags |= e_mainSurfaceDirty;
     }
     return DD_OK;
@@ -216,7 +241,8 @@ static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceUnlock(LPDIRECTDRAWSURFACE se
         return result;
     }
 
-    std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
+    s_primarySurface.m_surfaceMut.unlock();
+    std::lock_guard<std::mutex> _(s_primarySurface.m_flagsMut);
     s_primarySurface.m_flags |= e_mainSurfaceDirty;
     return DD_OK;
 }
@@ -283,7 +309,7 @@ static HRESULT STDMETHODCALLTYPE LegacyDDrawCreateSurface(LPDIRECTDRAW self, LPD
     }
 
     // Setup hooking for the primary surface (may Gawd have mercy on us)
-    std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
+    std::lock_guard<std::mutex> _(s_primarySurface.m_flagsMut);
     if (want_primary) {
         if (s_primarySurface.m_flags & e_ddrawPrimarySurfaceAcquired) {
             s_log << "IDirectDraw::CreateSurface: trying to create the primary surface multiple times..."
@@ -316,7 +342,7 @@ static HRESULT STDMETHODCALLTYPE LegacyDDrawCreateSurface(LPDIRECTDRAW self, LPD
         // 14: GetCaps
         // 15: GetClipper
         // 16: GetColorKey
-        // 17: GetDC
+        SwapImplementation(vftable, 17, s_ddrawSurfaceGetDC, LegacyProxySurfaceGetDC);
         // 18: GetFlipStatus
         // 19: GetOverlayPosition
         // 20: GetPalette
@@ -466,21 +492,27 @@ static void LegacyDrawThread()
             (s_primarySurface.m_flags & e_mainSurfaceDirty)) {
             frame_timer.start();
 
-            HRESULT result = s_ddrawSurfaceLock(s_primarySurface.m_proxySurface, nullptr,
-                                                &desc, DDLOCK_WAIT, nullptr);
+            HRESULT result = s_primarySurface.m_proxySurface->Lock(nullptr,
+                                                                   &desc,
+                                                                   DDLOCK_WAIT,
+                                                                   nullptr);
             if (FAILED(result)) {
                 s_log << "LegacyDrawThread: ERROR failed to lock proxy surface 0x"
-                    << std::hex << result << std::endl;
+                      << std::hex << result << std::endl;
                 Sleep(5);
                 continue;
             }
 
             memcpy(rgb555buf, desc.lpSurface, PIXEL_COUNT * sizeof(uint16_t));
-            s_ddrawSurfaceUnlock(s_primarySurface.m_proxySurface, desc.lpSurface);
+            result = s_primarySurface.m_proxySurface->Unlock(desc.lpSurface);
+            if (FAILED(result)) {
+                s_log << "LegacyDrawThread: ERROR failed to unlock proxy surface -- potential deadlock 0x"
+                    << std::hex << result << std::endl;
+            }
 
-            s_primarySurface.m_lock.lock();
+            s_primarySurface.m_flagsMut.lock();
             s_primarySurface.m_flags &= ~e_mainSurfaceDirty;
-            s_primarySurface.m_lock.unlock();
+            s_primarySurface.m_flagsMut.unlock();
 
             // Maybe at some point this should be vectorized?
             for (size_t i = 0; i < PIXEL_COUNT; ++i) {
@@ -549,35 +581,35 @@ static void LegacyDrawThread()
 
 void DDrawForceDirty()
 {
-    s_primarySurface.m_lock.lock();
+    s_primarySurface.m_flagsMut.lock();
     s_primarySurface.m_flags |= e_mainSurfaceDirty;
-    s_primarySurface.m_lock.unlock();
+    s_primarySurface.m_flagsMut.unlock();
 }
 
 // ================================================================================================
 
 void DDrawShowFPS(bool on)
 {
-    s_primarySurface.m_lock.lock();
+    s_primarySurface.m_flagsMut.lock();
     if (on)
         s_primarySurface.m_flags |= e_showFps;
     else
         s_primarySurface.m_flags &= ~e_showFps;
     s_primarySurface.m_flags |= e_mainSurfaceDirty;
-    s_primarySurface.m_lock.unlock();
+    s_primarySurface.m_flagsMut.unlock();
 }
 
 // ================================================================================================
 
 void DDrawShowFrameTime(bool on)
 {
-    s_primarySurface.m_lock.lock();
+    s_primarySurface.m_flagsMut.lock();
     if (on)
         s_primarySurface.m_flags |= e_showFrameTime;
     else
         s_primarySurface.m_flags &= ~e_showFrameTime;
     s_primarySurface.m_flags |= e_mainSurfaceDirty;
-    s_primarySurface.m_lock.unlock();
+    s_primarySurface.m_flagsMut.unlock();
 }
 
 // ================================================================================================
@@ -606,16 +638,16 @@ void DDrawAcquireGdiObjects()
     font.lfPitchAndFamily = FIXED_PITCH;
     s_primarySurface.m_font = CreateFontIndirectA(&font);
 
-    s_primarySurface.m_lock.lock();
+    s_primarySurface.m_flagsMut.lock();
     s_primarySurface.m_flags |= e_gdiObjectsAcquired;
-    s_primarySurface.m_lock.unlock();
+    s_primarySurface.m_flagsMut.unlock();
 }
 
 // ================================================================================================
 
 void DDrawReleaseGdiObjects()
 {
-    std::lock_guard<std::mutex> _(s_primarySurface.m_lock);
+    std::lock_guard<std::mutex> _(s_primarySurface.m_flagsMut);
     if (s_primarySurface.m_flags & e_gdiObjectsAcquired) {
         s_primarySurface.m_flags &= ~e_gdiObjectsAcquired;
         DeleteObject(s_primarySurface.m_font);
@@ -628,9 +660,9 @@ void DDrawReleaseGdiObjects()
 
 void DDrawSignalInitComplete()
 {
-    s_primarySurface.m_lock.lock();
+    s_primarySurface.m_flagsMut.lock();
     s_primarySurface.m_flags |= e_initComplete;
-    s_primarySurface.m_lock.unlock();
+    s_primarySurface.m_flagsMut.unlock();
 }
 
 // ================================================================================================
@@ -652,9 +684,9 @@ void DDrawSetBltOffset(int x, int y)
 
 void DDrawJoin()
 {
-    s_primarySurface.m_lock.lock();
+    s_primarySurface.m_flagsMut.lock();
     s_primarySurface.m_flags |= e_wantQuit;
-    s_primarySurface.m_lock.unlock();
+    s_primarySurface.m_flagsMut.unlock();
     s_drawThread.join();
 }
 
