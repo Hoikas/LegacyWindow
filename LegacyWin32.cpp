@@ -520,8 +520,6 @@ static BOOL WINAPI LegacyGetScreenToClient(_In_ HWND hWnd, _Inout_ LPPOINT lpPoi
 
 static BOOL WINAPI LegacySetMenu(_In_ HWND hWnd, _In_opt_ HMENU hMenu)
 {
-    if (!hMenu)
-        s_log << "SetMenu: ate attempt to murder the menu" << std::endl;
     return TRUE;
 }
 
@@ -607,7 +605,6 @@ static BOOL WINAPI LegacyPeekMessage(_Out_ LPMSG lpMsg, _In_opt_ HWND hWnd, _In_
     case WM_LBUTTONUP:
     case WM_MOUSEMOVE: {
         bool down = lpMsg->wParam & MK_LBUTTON;
-        s_log << "PeekMessageA: Handled suppressed LMB " << (down ? "down" : "up") << std::endl;
         LegacyHandleLMB(hWnd, down, GET_X_LPARAM(lpMsg->lParam), GET_Y_LPARAM(lpMsg->lParam));
         break;
     }
