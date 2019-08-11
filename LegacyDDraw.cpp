@@ -131,12 +131,7 @@ static HRESULT STDMETHODCALLTYPE LegacyProxySurfaceBltFast(LPDIRECTDRAWSURFACE s
                                                            DWORD dwTrans)
 {
     auto it = s_ephemeralSurfaces.find(lpDDSrcSurface);
-    if (it != s_ephemeralSurfaces.end()) {
-        if (!s_primarySurface.m_bltTarget) {
-            s_log << "IDirectDrawSurface::BltFast: ERROR! No HWND available for blt..." << std::endl;
-            return DDERR_NOHWND;
-        }
-
+    if (it != s_ephemeralSurfaces.end() && s_primarySurface.m_bltTarget) {
         // This is used to draw bitmaps to dialog boxes. In Windows versions before Vista, this worked
         // great because this surface (generally) represented the GDI surface, which was responsible for
         // all drawing. Not so much, now.
