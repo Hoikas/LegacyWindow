@@ -48,6 +48,7 @@ struct _DialogWndData
     LPCSTR m_template{ };
     DLGPROC m_dlgproc{ };
     LPARAM m_initParam{ };
+    HWND m_previousBltTarget{ };
 };
 
 // ================================================================================================
@@ -651,13 +652,8 @@ static BOOL WINAPI LegacyDialogProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
             offsetY -= s_getSystemMetricsHook->original()(SM_CYMENU);
         }
         DDrawSetBltOffset(dlg_rect.left + offsetX, dlg_rect.top + offsetY);
+        data->m_previousBltTarget = DDrawBltToHWND(wnd);
 
-        return result;
-    }
-    case WM_PAINT: {
-        HWND previous_target = DDrawBltToHWND(wnd);
-        BOOL result = data->m_dlgproc(wnd, msg, wParam, lParam);
-        DDrawBltToHWND(previous_target);
         return result;
     }
     default:
@@ -682,8 +678,10 @@ static INT_PTR WINAPI LegacyDialogBoxParam(_In_opt_ HINSTANCE hInstance,
     // from other windows in how the procedures work. Hence the differences from CreateWindowExA.
 
     _DialogWndData userdata{ hInstance, lpTemplateName, lpDialogFunc, dwInitParam };
-    return s_dialogBoxParamHook->original()(hInstance, lpTemplateName, hWndParent,
-                                            LegacyDialogProc, (LPARAM)&userdata);
+    INT_PTR result = s_dialogBoxParamHook->original()(hInstance, lpTemplateName, hWndParent,
+                                                      LegacyDialogProc, (LPARAM)&userdata);
+    DDrawBltToHWND(userdata.m_previousBltTarget);
+    return result;
 }
 
 // ================================================================================================
